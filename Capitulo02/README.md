@@ -65,6 +65,7 @@ Ejecute PowerShell **como administrador** para crear las rutas requeridas:
 ```powershell
 New-Item -ItemType Directory -Force `
   -Path C:\SQLLab2025\Scripts,
+        C:\SQLLab2025\Scripts\Lab02,
         C:\SQLLab2025\Reports,
         C:\SQLLab2025\Data,
         C:\SQLLab2025\Logs,
@@ -205,7 +206,7 @@ DROP PROCEDURE IF EXISTS Reporting.usp_OrderSearch;
 DROP PROCEDURE IF EXISTS Reporting.usp_MonthlySalesSummary;
 GO
 
-DROP TABLE IF EXISTS dbo.LabExecutionLog;
+DROP TABLE IF EXISTS dbo.Lab02ExecutionLog;
 DROP TABLE IF EXISTS dbo.LabSalesOrder;
 DROP TABLE IF EXISTS dbo.LabCustomer;
 GO
@@ -235,14 +236,14 @@ CREATE TABLE dbo.LabSalesOrder
 );
 GO
 
-CREATE TABLE dbo.LabExecutionLog
+CREATE TABLE dbo.Lab02ExecutionLog
 (
     ExecutionLogID      bigint IDENTITY(1,1) NOT NULL
-        CONSTRAINT PK_LabExecutionLog PRIMARY KEY,
+        CONSTRAINT PK_Lab02ExecutionLog PRIMARY KEY,
     Phase               varchar(20) NOT NULL,
     ProcedureName       sysname NOT NULL,
     CapturedAt          datetime2(0) NOT NULL
-        CONSTRAINT DF_LabExecutionLog_CapturedAt DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT DF_Lab02ExecutionLog_CapturedAt DEFAULT SYSUTCDATETIME(),
     QueryID             bigint NULL,
     PlanID              bigint NULL,
     AvgDurationMs       decimal(18,2) NULL,
@@ -289,11 +290,35 @@ SELECT
         WHEN n <= 50000 THEN ((n - 1) % 25) + 1
         ELSE ((n - 1) % 9975) + 26
     END,
-    DATEADD(minute, -(n * 13 % 1051200), SYSUTCDATETIME()),
+    DATEADD(minute, CONVERT(int, (n * 17) % 1051200), CONVERT(datetime2(0), '2024-01-01')),
     CHOOSE(((n - 1) % 4) + 1, 'C', 'P', 'S', 'R'),
     CONVERT(decimal(12,2), 10 + ((n * 37) % 50000) / 10.0),
     CASE WHEN n % 20 = 0 THEN N'Pedido con revisión manual' ELSE N'Pedido estándar' END
 FROM N;
+GO
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM dbo.LabSalesOrder
+    WHERE CustomerID = 1
+      AND OrderDate >= CONVERT(datetime2(0), '2024-06-15')
+      AND OrderDate < CONVERT(datetime2(0), '2024-06-16')
+)
+BEGIN
+    INSERT dbo.LabSalesOrder
+    (
+        CustomerID, OrderDate, OrderStatus, TotalAmount, Notes
+    )
+    VALUES
+    (
+        1,
+        CONVERT(datetime2(0), '2024-06-15 10:15:00'),
+        'C',
+        125.50,
+        N'Pedido de referencia para Reporting.usp_OrderSearch.'
+    );
+END;
 GO
 
 UPDATE STATISTICS dbo.LabCustomer WITH FULLSCAN;
@@ -373,6 +398,9 @@ GO
 5. Compruebe que se cargaron las filas esperadas:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT
     (SELECT COUNT(*) FROM dbo.LabCustomer) AS Clientes,
     (SELECT COUNT(*) FROM dbo.LabSalesOrder) AS Pedidos;
@@ -384,6 +412,9 @@ GO
 **Verificación:** ejecute el siguiente comando y confirme que inicialmente sólo existe el índice clustered de la clave primaria sobre pedidos:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 EXEC sys.sp_helpindex N'dbo.LabSalesOrder';
 GO
 ```
@@ -442,6 +473,9 @@ GO
 USE Sql2025Lab;
 GO
 
+EXEC sys.sp_query_store_flush_db;
+GO
+
 SELECT
     q.query_id,
     p.plan_id,
@@ -469,9 +503,15 @@ ORDER BY DuracionPromedioMs DESC;
 GO
 ```
 
-6. Registre una captura inicial resumida en `dbo.LabExecutionLog`:
+6. Registre una captura inicial resumida en `dbo.Lab02ExecutionLog`:
 
 ```sql
+USE Sql2025Lab;
+GO
+
+EXEC sys.sp_query_store_flush_db;
+GO
+
 ;WITH Metric AS
 (
     SELECT
@@ -498,7 +538,7 @@ GO
     )
     GROUP BY q.query_id, p.plan_id, q.object_id
 )
-INSERT dbo.LabExecutionLog
+INSERT dbo.Lab02ExecutionLog
 (
     Phase, ProcedureName, QueryID, PlanID,
     AvgDurationMs, AvgCpuMs, AvgLogicalReads, ExecutionCount, Notes
@@ -522,8 +562,11 @@ GO
 **Verificación:** confirme que existen filas con `Phase = 'BEFORE'`:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT *
-FROM dbo.LabExecutionLog
+FROM dbo.Lab02ExecutionLog
 WHERE Phase = 'BEFORE'
 ORDER BY ExecutionLogID;
 GO
@@ -565,6 +608,12 @@ Databases
 **Verificación:** ejecute esta consulta para confirmar que Query Store contiene los tres objetos:
 
 ```sql
+USE Sql2025Lab;
+GO
+
+EXEC sys.sp_query_store_flush_db;
+GO
+
 SELECT
     OBJECT_SCHEMA_NAME(object_id) AS Esquema,
     OBJECT_NAME(object_id) AS Procedimiento,
@@ -593,20 +642,41 @@ GO
 USE Sql2025Lab;
 GO
 
-CREATE INDEX IX_LabSalesOrder_CustomerID_OrderDate
-ON dbo.LabSalesOrder (CustomerID, OrderDate DESC)
-INCLUDE (OrderStatus, TotalAmount, Notes);
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.indexes
+    WHERE object_id = OBJECT_ID(N'dbo.LabSalesOrder')
+      AND name = N'IX_LabSalesOrder_CustomerID_OrderDate'
+)
+BEGIN
+    CREATE INDEX IX_LabSalesOrder_CustomerID_OrderDate
+    ON dbo.LabSalesOrder (CustomerID, OrderDate DESC)
+    INCLUDE (OrderStatus, TotalAmount, Notes);
+END;
 GO
 
-CREATE INDEX IX_LabSalesOrder_OrderDate_CustomerID
-ON dbo.LabSalesOrder (OrderDate, CustomerID)
-INCLUDE (OrderStatus, TotalAmount);
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.indexes
+    WHERE object_id = OBJECT_ID(N'dbo.LabSalesOrder')
+      AND name = N'IX_LabSalesOrder_OrderDate_CustomerID'
+)
+BEGIN
+    CREATE INDEX IX_LabSalesOrder_OrderDate_CustomerID
+    ON dbo.LabSalesOrder (OrderDate, CustomerID)
+    INCLUDE (OrderStatus, TotalAmount);
+END;
 GO
 ```
 
 2. Actualice las estadísticas para que el optimizador disponga de información actualizada:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 UPDATE STATISTICS dbo.LabCustomer WITH FULLSCAN;
 UPDATE STATISTICS dbo.LabSalesOrder WITH FULLSCAN;
 GO
@@ -618,6 +688,9 @@ GO
    - emplear un rango de fechas sargable.
 
 ```sql
+USE Sql2025Lab;
+GO
+
 CREATE OR ALTER PROCEDURE Reporting.usp_OrderSearch
     @OrderDate date,
     @CustomerCode varchar(12)
@@ -645,6 +718,9 @@ GO
 4. Reescriba `usp_MonthlySalesSummary` para reemplazar el predicado no sargable `YEAR(OrderDate) = @Year` por un rango:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 CREATE OR ALTER PROCEDURE Reporting.usp_MonthlySalesSummary
     @Year int
 AS
@@ -673,6 +749,9 @@ GO
 5. Revise los índices creados:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 EXEC sys.sp_helpindex N'dbo.LabSalesOrder';
 GO
 ```
@@ -682,6 +761,9 @@ GO
 **Verificación:** consulte las estadísticas de los índices:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT
     i.name AS Indice,
     s.name AS Estadistica,
@@ -718,6 +800,9 @@ GO
 2. Fuerce una recompilación del procedimiento y ejecute un rango muy selectivo:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 EXEC sys.sp_recompile N'Reporting.usp_SalesByCustomerRange';
 GO
 
@@ -730,6 +815,9 @@ GO
 3. Sin recompilar de nuevo, ejecute otra vez el rango amplio. El plan compilado para el rango selectivo puede reutilizarse para un conjunto mucho mayor de filas:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SET STATISTICS IO ON;
 SET STATISTICS TIME ON;
 GO
@@ -747,6 +835,12 @@ GO
 4. Localice los planes históricos para la sentencia del procedimiento:
 
 ```sql
+USE Sql2025Lab;
+GO
+
+EXEC sys.sp_query_store_flush_db;
+GO
+
 SELECT
     q.query_id,
     p.plan_id,
@@ -778,6 +872,9 @@ GO
    **Alternativa A: forzar el plan histórico estable**
 
 ```sql
+USE Sql2025Lab;
+GO
+
 -- Sustituya 123 y 456 por los valores observados en su instancia.
 EXEC sys.sp_query_store_force_plan
     @query_id = 123,
@@ -788,6 +885,9 @@ GO
    **Alternativa B: aplicar un Query Store hint**, si desea favorecer una compilación representativa:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 -- Sustituya 123 por el query_id observado.
 EXEC sys.sp_query_store_set_hints
     @query_id = 123,
@@ -798,6 +898,9 @@ GO
 7. Ejecute de nuevo el rango amplio y capture plan real, lecturas y tiempos:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SET STATISTICS IO ON;
 SET STATISTICS TIME ON;
 GO
@@ -815,6 +918,9 @@ GO
 8. Compruebe el estado de la corrección:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT
     q.query_id,
     p.plan_id,
@@ -874,6 +980,12 @@ GO
 3. Registre las métricas posteriores desde Query Store:
 
 ```sql
+USE Sql2025Lab;
+GO
+
+EXEC sys.sp_query_store_flush_db;
+GO
+
 ;WITH Metric AS
 (
     SELECT
@@ -900,7 +1012,7 @@ GO
     )
     GROUP BY q.query_id, p.plan_id, q.object_id
 )
-INSERT dbo.LabExecutionLog
+INSERT dbo.Lab02ExecutionLog
 (
     Phase, ProcedureName, QueryID, PlanID,
     AvgDurationMs, AvgCpuMs, AvgLogicalReads, ExecutionCount, Notes
@@ -922,7 +1034,7 @@ GO
 4. Cree un nuevo archivo en SSMS con el siguiente nombre exacto:
 
 ```text
-C:\SQLLab2025\Reports\Lab02_QueryComparisonBeforeAfter.sql
+C:\SQLLab2025\Scripts\Lab02\QueryComparisonBeforeAfter.sql
 ```
 
 5. Guarde en ese archivo la siguiente consulta de comparación:
@@ -931,9 +1043,31 @@ C:\SQLLab2025\Reports\Lab02_QueryComparisonBeforeAfter.sql
 USE Sql2025Lab;
 GO
 
+;WITH Ranked AS
+(
+    SELECT
+        ExecutionLogID,
+        ProcedureName,
+        QueryID,
+        PlanID,
+        Phase,
+        AvgDurationMs,
+        AvgCpuMs,
+        AvgLogicalReads,
+        ExecutionCount,
+        CapturedAt,
+        Notes,
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY ProcedureName, Phase
+            ORDER BY CapturedAt DESC, ExecutionLogID DESC
+        ) AS rn
+    FROM dbo.Lab02ExecutionLog
+)
 SELECT
     b.ProcedureName,
-    b.QueryID,
+    b.QueryID AS QueryIdBefore,
+    a.QueryID AS QueryIdAfter,
     b.PlanID AS PlanBefore,
     a.PlanID AS PlanAfter,
     b.AvgDurationMs AS DurationBeforeMs,
@@ -948,12 +1082,14 @@ SELECT
         / NULLIF(b.AvgDurationMs, 0)
         AS decimal(10,2)
     ) AS DurationImprovementPercent
-FROM dbo.LabExecutionLog AS b
-INNER JOIN dbo.LabExecutionLog AS a
+FROM Ranked AS b
+INNER JOIN Ranked AS a
     ON a.ProcedureName = b.ProcedureName
+   AND a.Phase = 'AFTER'
+   AND a.rn = 1
 WHERE b.Phase = 'BEFORE'
-  AND a.Phase = 'AFTER'
-ORDER BY b.ProcedureName, DurationImprovementPercent DESC;
+  AND b.rn = 1
+ORDER BY b.ProcedureName;
 GO
 
 SELECT
@@ -967,7 +1103,7 @@ SELECT
     ExecutionCount,
     CapturedAt,
     Notes
-FROM dbo.LabExecutionLog
+FROM dbo.Lab02ExecutionLog
 ORDER BY ProcedureName, Phase, CapturedAt;
 GO
 ```
@@ -1020,13 +1156,13 @@ La corrección aplicada se considera [aceptada / pendiente de revisión] porque 
 No se asume que Automatic Plan Correction esté disponible o habilitado en SQL Server local.
 ```
 
-**Resultado esperado:** deben existir los archivos `Lab02_QueryComparisonBeforeAfter.sql` y `Lab02_PerformanceFindings.md` en `C:\SQLLab2025\Reports`.
+**Resultado esperado:** deben existir `C:\SQLLab2025\Scripts\Lab02\QueryComparisonBeforeAfter.sql` y `C:\SQLLab2025\Reports\Lab02_PerformanceFindings.md`.
 
 **Verificación:** ejecute PowerShell:
 
 ```powershell
 Get-Item `
-  C:\SQLLab2025\Reports\Lab02_QueryComparisonBeforeAfter.sql,
+  C:\SQLLab2025\Scripts\Lab02\QueryComparisonBeforeAfter.sql,
   C:\SQLLab2025\Reports\Lab02_PerformanceFindings.md |
 Select-Object FullName, Length, LastWriteTime
 ```
@@ -1055,6 +1191,9 @@ Criterio de aceptación: `actual_state_desc` debe ser `READ_WRITE`.
 2. **Validación de índices**
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT
     i.name,
     i.type_desc,
@@ -1071,6 +1210,9 @@ Criterio de aceptación: deben existir `IX_LabSalesOrder_CustomerID_OrderDate` e
 3. **Validación de reescritura sargable**
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT
     OBJECT_SCHEMA_NAME(object_id) AS Esquema,
     OBJECT_NAME(object_id) AS Objeto,
@@ -1089,11 +1231,14 @@ Criterio de aceptación: `usp_OrderSearch` debe usar `OrderDate >= @OrderDate` y
 4. **Validación de evidencia antes y después**
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT
     ProcedureName,
     Phase,
     COUNT(*) AS Registros
-FROM dbo.LabExecutionLog
+FROM dbo.Lab02ExecutionLog
 GROUP BY ProcedureName, Phase
 ORDER BY ProcedureName, Phase;
 GO
@@ -1104,6 +1249,9 @@ Criterio de aceptación: debe existir al menos un registro `BEFORE` y uno `AFTER
 5. **Validación del plan forzado o hint, si se aplicó**
 
 ```sql
+USE Sql2025Lab;
+GO
+
 SELECT
     q.query_id,
     p.plan_id,
@@ -1151,7 +1299,7 @@ SET QUERY_STORE
 GO
 ```
 
-Espere al menos un intervalo de recolección o ejecute nuevamente las consultas. Verifique el estado con `sys.database_query_store_options`.
+Espere al menos un intervalo de recolección, ejecute `EXEC sys.sp_query_store_flush_db` dentro de `Sql2025Lab` y vuelva a consultar. Verifique el estado con `sys.database_query_store_options`.
 
 ### Problema 2: No se observan dos planes o no se aprecia una regresión de parameter sniffing
 
@@ -1168,7 +1316,10 @@ Espere al menos un intervalo de recolección o ejecute nuevamente las consultas.
 1. Si aplicó plan forcing, elimínelo antes de borrar objetos:
 
 ```sql
--- Sustituya 123 por el query_id utilizado.
+USE Sql2025Lab;
+GO
+
+-- Sustituya 123 y 456 por los valores utilizados.
 EXEC sys.sp_query_store_unforce_plan
     @query_id = 123,
     @plan_id = 456;
@@ -1178,13 +1329,16 @@ GO
 2. Si aplicó un Query Store hint, elimínelo:
 
 ```sql
+USE Sql2025Lab;
+GO
+
 -- Sustituya 123 por el query_id utilizado.
 EXEC sys.sp_query_store_clear_hints
     @query_id = 123;
 GO
 ```
 
-3. Para eliminar solamente la carga creada por esta práctica, ejecute:
+3. Para eliminar solamente la carga creada por esta práctica, ejecute el script siguiente. No elimina `dbo.LabExecutionLog`, porque ese registro pertenece a la práctica 1.
 
 ```sql
 USE Sql2025Lab;
@@ -1195,7 +1349,7 @@ DROP PROCEDURE IF EXISTS Reporting.usp_OrderSearch;
 DROP PROCEDURE IF EXISTS Reporting.usp_MonthlySalesSummary;
 GO
 
-DROP TABLE IF EXISTS dbo.LabExecutionLog;
+DROP TABLE IF EXISTS dbo.Lab02ExecutionLog;
 DROP TABLE IF EXISTS dbo.LabSalesOrder;
 DROP TABLE IF EXISTS dbo.LabCustomer;
 GO
@@ -1204,7 +1358,7 @@ GO
 4. No elimine estos archivos si continuará con la práctica de IA:
 
 ```text
-C:\SQLLab2025\Reports\Lab02_QueryComparisonBeforeAfter.sql
+C:\SQLLab2025\Scripts\Lab02\QueryComparisonBeforeAfter.sql
 C:\SQLLab2025\Reports\Lab02_PerformanceFindings.md
 ```
 
