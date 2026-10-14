@@ -4,13 +4,13 @@
 
 | Campo | Valor |
 |---|---|
-| Duración | 60 minutos |
+| Duración | 80 minutos |
 | Complejidad | Media |
 | Nivel de Bloom | Aplicar |
 
 ## Descripción General
 
-En esta práctica se implementan controles de seguridad complementarios para la base de datos `Sql2025Lab`: acceso basado en roles de mínimo privilegio, auditoría de eventos de seguridad y cifrado transparente de datos mediante Transparent Data Encryption (TDE). Se validarán los permisos usando cuentas SQL de laboratorio, se revisarán los eventos generados en archivos de auditoría y se realizará un respaldo de la base de datos protegida por TDE.
+En esta práctica se implementan controles de seguridad complementarios para la base de datos `Sql2025Lab`: acceso basado en roles de mínimo privilegio, enmascaramiento dinámico de datos, auditoría de eventos de seguridad y cifrado transparente de datos mediante Transparent Data Encryption (TDE). Se validarán los permisos usando cuentas SQL de laboratorio, se revisarán los eventos generados en archivos de auditoría y se realizará un respaldo de la base de datos protegida por TDE.
 
 La práctica aplica una estrategia de defensa en profundidad: autenticar identidades, limitar autorizaciones, registrar acciones relevantes y proteger los archivos físicos de la base de datos y sus respaldos.
 
@@ -18,6 +18,7 @@ La práctica aplica una estrategia de defensa en profundidad: autenticar identid
 
 - [ ] Implementar logins, usuarios y roles de base de datos aplicando el principio de mínimo privilegio.
 - [ ] Configurar permisos diferenciados para lectores, analistas y ejecutores de procedimientos autorizados.
+- [ ] Enmascarar columnas de `dbo.LabCustomer` y comprobar la diferencia entre una consulta sin `UNMASK` y otra con ese permiso.
 - [ ] Crear y validar una auditoría de SQL Server para eventos de inicio de sesión y acciones sobre objetos críticos.
 - [ ] Habilitar TDE en `Sql2025Lab`, respaldar el certificado requerido y generar un respaldo recuperable.
 - [ ] Verificar que los controles de acceso, auditoría y cifrado funcionan según lo esperado.
@@ -136,9 +137,9 @@ GO
 4. Si la instancia utiliza la cuenta virtual predeterminada, otorgue permisos de modificación a la cuenta de servicio:
 
    ```powershell
-   icacls C:\SQLLab2025\Audit /grant "NT SERVICE\MSSQLSERVER:(OI)(CI)M"
-   icacls C:\SQLLab2025\Keys /grant "NT SERVICE\MSSQLSERVER:(OI)(CI)M"
-   icacls C:\SQLLab2025\Backups /grant "NT SERVICE\MSSQLSERVER:(OI)(CI)M"
+   icacls C:\SQLLab2025\Audit /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"'
+   icacls C:\SQLLab2025\Keys /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"'
+   icacls C:\SQLLab2025\Backups /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"'
    ```
 
    Si el servicio usa una cuenta de dominio o una cuenta administrada distinta, sustituya `NT SERVICE\MSSQLSERVER` por la identidad devuelta en `StartName`.
@@ -274,6 +275,9 @@ GO
 4. Asigne los usuarios a los roles. En esta práctica, `lab_reader` representa la función lectora y `lab_analyst` representa la función analista. El rol `db_lab_executor` se crea para demostrar una función separada de ejecución controlada.
 
    ```sql
+   USE Sql2025Lab;
+   GO
+
    ALTER ROLE db_lab_reader ADD MEMBER lab_reader;
    GO
 
@@ -338,7 +342,28 @@ GO
 
 **Instrucciones**
 
-1. Otorgue al rol lector únicamente permiso `SELECT` sobre el esquema `Reporting`.
+1. Cree una vista en `Reporting` a partir de las tablas de la práctica 2. El esquema no tiene tablas propias; esta vista permite comprobar el permiso `SELECT` sin autorizar el acceso directo a `dbo.LabSalesOrder` ni a `dbo.LabCustomer`.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   CREATE OR ALTER VIEW Reporting.v_LabOrderSummary
+   AS
+   SELECT
+       o.SalesOrderID,
+       c.CustomerCode,
+       c.CustomerName,
+       o.OrderDate,
+       o.OrderStatus,
+       o.TotalAmount
+   FROM dbo.LabSalesOrder AS o
+   INNER JOIN dbo.LabCustomer AS c
+       ON c.CustomerID = o.CustomerID;
+   GO
+   ```
+
+2. Otorgue al rol lector únicamente permiso `SELECT` sobre el esquema `Reporting`.
 
    ```sql
    USE Sql2025Lab;
@@ -348,7 +373,7 @@ GO
    GO
    ```
 
-2. Otorgue al rol analista permisos de lectura sobre el esquema `Reporting` y sobre el objeto de negocio autorizado `Sales.Orders`.
+3. Otorgue al rol analista permisos de lectura sobre el esquema `Reporting` y sobre el objeto de negocio autorizado `Sales.Orders`.
 
    ```sql
    USE Sql2025Lab;
@@ -359,29 +384,28 @@ GO
    GO
    ```
 
-3. Seleccione un procedimiento aprobado de la lista obtenida en el paso 1. Para este ejemplo se utiliza `Reporting.usp_LabOrderSummary`. Si el nombre no existe en su base de datos, sustitúyalo por un procedimiento existente y aprobado.
+4. Autorice la ejecución de `Reporting.usp_OrderSearch`, el procedimiento de búsqueda creado en la práctica 2. Sus parámetros son `@OrderDate date` y `@CustomerCode varchar(12)`.
 
    ```sql
    USE Sql2025Lab;
    GO
 
-   -- Sustituya Reporting.usp_LabOrderSummary por el procedimiento aprobado de su entorno.
-   GRANT EXECUTE ON OBJECT::Reporting.usp_LabOrderSummary TO db_lab_analyst;
-   GRANT EXECUTE ON OBJECT::Reporting.usp_LabOrderSummary TO db_lab_executor;
+   GRANT EXECUTE ON OBJECT::Reporting.usp_OrderSearch TO db_lab_analyst;
+   GRANT EXECUTE ON OBJECT::Reporting.usp_OrderSearch TO db_lab_executor;
    GO
    ```
 
-4. Si el procedimiento seleccionado requiere parámetros, identifique su definición antes de realizar las pruebas.
+5. Revise la definición antes de las pruebas de acceso:
 
    ```sql
    USE Sql2025Lab;
    GO
 
-   EXEC sys.sp_helptext N'Reporting.usp_LabOrderSummary';
+   EXEC sys.sp_helptext N'Reporting.usp_OrderSearch';
    GO
    ```
 
-5. Revise los permisos explícitos otorgados a los roles de laboratorio.
+6. Revise los permisos explícitos otorgados a los roles de laboratorio.
 
    ```sql
    USE Sql2025Lab;
@@ -409,8 +433,8 @@ GO
 **Resultado esperado**
 
 - `db_lab_reader` posee solamente `SELECT` sobre el esquema `Reporting`.
-- `db_lab_analyst` posee `SELECT` sobre `Reporting` y `Sales.Orders`, además de `EXECUTE` sobre el procedimiento autorizado.
-- `db_lab_executor` posee solamente `EXECUTE` sobre el procedimiento autorizado.
+- `db_lab_analyst` posee `SELECT` sobre `Reporting` y `Sales.Orders`, además de `EXECUTE` sobre `Reporting.usp_OrderSearch`.
+- `db_lab_executor` posee solamente `EXECUTE` sobre `Reporting.usp_OrderSearch`.
 - No se asignan permisos de modificación sobre `Sales.Orders` a los usuarios de prueba.
 
 **Verificación**
@@ -448,12 +472,15 @@ GO
 2. Ejecute una consulta sobre un objeto del esquema `Reporting`:
 
    ```sql
-   SELECT TOP (5) *
-   FROM Reporting.Orders;
+   SELECT TOP (5)
+       SalesOrderID,
+       CustomerCode,
+       OrderDate,
+       OrderStatus,
+       TotalAmount
+   FROM Reporting.v_LabOrderSummary;
    GO
    ```
-
-   Si `Reporting.Orders` no existe, seleccione otra vista o tabla disponible en el esquema `Reporting`.
 
 3. Intente leer la tabla de negocio directamente. El acceso debe ser denegado para `lab_reader`.
 
@@ -490,10 +517,12 @@ GO
    GO
    ```
 
-7. Ejecute el procedimiento autorizado, ajustando parámetros si corresponde:
+7. Ejecute el procedimiento autorizado con el pedido de referencia de la práctica 2:
 
    ```sql
-   EXEC Reporting.usp_LabOrderSummary;
+   EXEC Reporting.usp_OrderSearch
+       @OrderDate = '2024-06-15',
+       @CustomerCode = 'C00000000001';
    GO
    ```
 
@@ -508,9 +537,9 @@ GO
 
 **Resultado esperado**
 
-- `lab_reader` puede consultar objetos de `Reporting`.
+- `lab_reader` puede consultar `Reporting.v_LabOrderSummary`.
 - `lab_reader` recibe un error de permiso al consultar o modificar `Sales.Orders`.
-- `lab_analyst` puede consultar `Sales.Orders` y ejecutar el procedimiento autorizado.
+- `lab_analyst` puede consultar `Sales.Orders` y ejecutar `Reporting.usp_OrderSearch` con `@OrderDate = '2024-06-15'` y `@CustomerCode = 'C00000000001'`.
 - `lab_analyst` recibe un error de permiso al intentar ejecutar `UPDATE` sobre `Sales.Orders`.
 
 **Verificación**
@@ -524,25 +553,265 @@ GO
 EXECUTE AS USER = N'lab_reader';
 SELECT
     USER_NAME() AS execution_context,
-    HAS_PERMS_BY_NAME(N'Reporting', N'SCHEMA', N'SELECT') AS can_select_reporting,
+    HAS_PERMS_BY_NAME(N'Reporting.v_LabOrderSummary', N'OBJECT', N'SELECT') AS can_select_reporting,
     HAS_PERMS_BY_NAME(N'Sales.Orders', N'OBJECT', N'SELECT') AS can_select_orders,
-    HAS_PERMS_BY_NAME(N'Sales.Orders', N'OBJECT', N'UPDATE') AS can_update_orders;
+    HAS_PERMS_BY_NAME(N'Sales.Orders', N'OBJECT', N'UPDATE') AS can_update_orders,
+    HAS_PERMS_BY_NAME(N'Reporting.usp_OrderSearch', N'OBJECT', N'EXECUTE') AS can_execute_order_search;
 REVERT;
 GO
 
 EXECUTE AS USER = N'lab_analyst';
 SELECT
     USER_NAME() AS execution_context,
-    HAS_PERMS_BY_NAME(N'Reporting', N'SCHEMA', N'SELECT') AS can_select_reporting,
+    HAS_PERMS_BY_NAME(N'Reporting.v_LabOrderSummary', N'OBJECT', N'SELECT') AS can_select_reporting,
     HAS_PERMS_BY_NAME(N'Sales.Orders', N'OBJECT', N'SELECT') AS can_select_orders,
-    HAS_PERMS_BY_NAME(N'Sales.Orders', N'OBJECT', N'UPDATE') AS can_update_orders;
+    HAS_PERMS_BY_NAME(N'Sales.Orders', N'OBJECT', N'UPDATE') AS can_update_orders,
+    HAS_PERMS_BY_NAME(N'Reporting.usp_OrderSearch', N'OBJECT', N'EXECUTE') AS can_execute_order_search;
 REVERT;
 GO
 ```
 
 ---
 
-### Paso 5: Crear y habilitar la auditoría de SQL Server
+### Paso 5: Enmascarar columnas de clientes
+
+**Objetivo:** Aplicar enmascaramiento dinámico sobre `dbo.LabCustomer` para que una consulta autorizada no devuelva el valor almacenado completo.
+
+**Instrucciones**
+
+1. Agregue la columna `Email` y un valor de ejemplo para el cliente 1. Los procedimientos de la práctica 2 no leen esta columna.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   IF COL_LENGTH(N'dbo.LabCustomer', N'Email') IS NULL
+       ALTER TABLE dbo.LabCustomer
+       ADD Email nvarchar(80) NULL;
+   GO
+
+   UPDATE dbo.LabCustomer
+   SET Email = N'c1@alfavalue.example'
+   WHERE CustomerID = 1;
+   GO
+   ```
+
+2. Incluya `Email` en la vista que `lab_reader` ya puede consultar.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   CREATE OR ALTER VIEW Reporting.v_LabOrderSummary
+   AS
+   SELECT
+       o.SalesOrderID,
+       c.CustomerCode,
+       c.CustomerName,
+       c.Email,
+       o.OrderDate,
+       o.OrderStatus,
+       o.TotalAmount
+   FROM dbo.LabSalesOrder AS o
+   INNER JOIN dbo.LabCustomer AS c
+       ON c.CustomerID = o.CustomerID;
+   GO
+   ```
+
+3. Aplique tres funciones de enmascaramiento. `default()` oculta el texto, `partial()` conserva los extremos del código y `email()` conserva solo la primera letra de la dirección.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   IF NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.masked_columns
+       WHERE object_id = OBJECT_ID(N'dbo.LabCustomer')
+         AND name = N'CustomerName'
+   )
+       ALTER TABLE dbo.LabCustomer
+       ALTER COLUMN CustomerName ADD MASKED WITH (FUNCTION = 'default()');
+   GO
+
+   IF NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.masked_columns
+       WHERE object_id = OBJECT_ID(N'dbo.LabCustomer')
+         AND name = N'CustomerCode'
+   )
+       ALTER TABLE dbo.LabCustomer
+       ALTER COLUMN CustomerCode ADD MASKED WITH (FUNCTION = 'partial(1, "XXXX", 2)');
+   GO
+
+   IF NOT EXISTS
+   (
+       SELECT 1
+       FROM sys.masked_columns
+       WHERE object_id = OBJECT_ID(N'dbo.LabCustomer')
+         AND name = N'Email'
+   )
+       ALTER TABLE dbo.LabCustomer
+       ALTER COLUMN Email ADD MASKED WITH (FUNCTION = 'email()');
+   GO
+   ```
+
+4. Consulte el catálogo de columnas enmascaradas.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   SELECT
+       OBJECT_SCHEMA_NAME(object_id) AS esquema,
+       OBJECT_NAME(object_id) AS tabla,
+       name AS columna,
+       masking_function
+   FROM sys.masked_columns
+   WHERE object_id = OBJECT_ID(N'dbo.LabCustomer')
+   ORDER BY columna;
+   GO
+   ```
+
+5. Como administrador, lea el cliente 1. El rol `sysadmin` ve el valor almacenado.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   SELECT
+       CustomerCode,
+       CustomerName,
+       Email
+   FROM dbo.LabCustomer
+   WHERE CustomerID = 1;
+   GO
+   ```
+
+**Resultado esperado**
+
+- `CustomerName` usa `default()`, `CustomerCode` usa `partial(1, "XXXX", 2)` y `Email` usa `email()`.
+- La consulta de administrador devuelve `C00000000001`, `Cliente de laboratorio 1` y `c1@alfavalue.example`.
+
+**Verificación**
+
+```sql
+USE Sql2025Lab;
+GO
+
+SELECT COUNT(*) AS columnas_enmascaradas
+FROM sys.masked_columns
+WHERE object_id = OBJECT_ID(N'dbo.LabCustomer');
+GO
+```
+
+El conteo debe ser `3`.
+
+---
+
+### Paso 6: Comprobar el enmascaramiento y el permiso UNMASK
+
+**Objetivo:** Ver el dato enmascarado con `lab_reader` y el dato original con `lab_analyst` después de conceder `UNMASK`.
+
+El filtro `WHERE` se evalúa con el valor almacenado. La máscara se aplica al resultado que recibe un usuario sin `UNMASK`.
+
+**Instrucciones**
+
+1. En la ventana de `lab_reader` del paso 4, consulte la vista por el código real del cliente 1.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   SELECT TOP (1)
+       CustomerCode,
+       CustomerName,
+       Email
+   FROM Reporting.v_LabOrderSummary
+   WHERE CustomerCode = 'C00000000001';
+   GO
+   ```
+
+2. Repita la misma consulta en la ventana de administrador y compare el resultado con el del punto anterior.
+
+3. Conceda `UNMASK` solo al rol analista.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   GRANT UNMASK TO db_lab_analyst;
+   GO
+   ```
+
+4. En la ventana de `lab_analyst`, ejecute la misma consulta de la vista.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   SELECT TOP (1)
+       CustomerCode,
+       CustomerName,
+       Email
+   FROM Reporting.v_LabOrderSummary
+   WHERE CustomerCode = 'C00000000001';
+   GO
+   ```
+
+5. Desde la ventana de administrador, confirme el permiso efectivo. `EXECUTE AS` usa el contexto del usuario de base de datos.
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   EXECUTE AS USER = N'lab_reader';
+   SELECT
+       USER_NAME() AS usuario,
+       HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'UNMASK') AS tiene_unmask;
+   REVERT;
+   GO
+
+   EXECUTE AS USER = N'lab_analyst';
+   SELECT
+       USER_NAME() AS usuario,
+       HAS_PERMS_BY_NAME(DB_NAME(), N'DATABASE', N'UNMASK') AS tiene_unmask;
+   REVERT;
+   GO
+   ```
+
+**Resultado esperado**
+
+- `lab_reader` recibe `CXXXX01`, `xxxx` y `cXXX@XXXX.com`.
+- El administrador recibe `C00000000001`, `Cliente de laboratorio 1` y `c1@alfavalue.example`.
+- `lab_analyst`, con `UNMASK`, recibe los mismos valores que el administrador.
+- `tiene_unmask` es `0` para `lab_reader` y `1` para `lab_analyst`.
+
+**Verificación**
+
+```sql
+USE Sql2025Lab;
+GO
+
+SELECT
+    grantee.name AS rol,
+    permission_name,
+    state_desc
+FROM sys.database_permissions AS dp
+INNER JOIN sys.database_principals AS grantee
+    ON dp.grantee_principal_id = grantee.principal_id
+WHERE dp.permission_name = N'UNMASK'
+  AND grantee.name = N'db_lab_analyst';
+GO
+```
+
+La fila debe mostrar `GRANT` sobre `UNMASK` para `db_lab_analyst`.
+
+---
+
+### Paso 7: Crear y habilitar la auditoría de SQL Server
 
 **Objetivo:** Configurar una auditoría basada en archivos para registrar inicios de sesión y acciones relevantes sobre `Sales.Orders`.
 
@@ -692,7 +961,7 @@ GO
 
 ---
 
-### Paso 6: Generar y consultar eventos auditados
+### Paso 8: Generar y consultar eventos auditados
 
 **Objetivo:** Producir eventos controlados y revisar la evidencia generada por SQL Server Audit.
 
@@ -814,7 +1083,7 @@ Documente en `C:\SQLLab2025\Reports` los siguientes datos: fecha y hora, identid
 
 ---
 
-### Paso 7: Crear la jerarquía criptográfica y habilitar TDE
+### Paso 9: Crear la jerarquía criptográfica y habilitar TDE
 
 **Objetivo:** Crear una Database Master Key en `master`, crear y respaldar un certificado de servidor, crear la Database Encryption Key y activar TDE para `Sql2025Lab`.
 
@@ -983,7 +1252,7 @@ GO
 
 ---
 
-### Paso 8: Crear y validar el respaldo protegido por TDE
+### Paso 10: Crear y validar el respaldo protegido por TDE
 
 **Objetivo:** Generar un respaldo de `Sql2025Lab` después de habilitar TDE y confirmar que el certificado es un requisito de restauración.
 
@@ -1070,6 +1339,8 @@ Complete la siguiente lista de validación antes de dar por terminada la prácti
 | Rol analista | Consultar `Sales.Orders` | Operación permitida |
 | Rol analista | Ejecutar procedimiento autorizado | Operación permitida |
 | Rol analista | Ejecutar `UPDATE` sobre `Sales.Orders` | Permiso denegado |
+| Enmascaramiento | `lab_reader` consulta `Reporting.v_LabOrderSummary` | Ve `CXXXX01`, `xxxx` y `cXXX@XXXX.com` |
+| Enmascaramiento | `lab_analyst` consulta la misma vista | Ve el código, el nombre y el correo almacenados |
 | Auditoría de login | Intentar conexión con contraseña incorrecta | Evento `FAILED_LOGIN_GROUP` registrado |
 | Auditoría de objetos | Consultar `Sales.Orders` | Evento con objeto `Orders` registrado |
 | Auditoría de esquema | Crear y eliminar tabla de prueba | Evento de cambio de esquema registrado |
@@ -1121,6 +1392,12 @@ GO
 - **Causa:** La auditoría o una especificación está deshabilitada, la ruta comodín no coincide con los archivos creados, el evento se generó antes de habilitar la especificación o la cola de auditoría todavía no se ha vaciado.
 - **Corrección:** Compruebe `sys.dm_server_audit_status`, `sys.server_audit_specifications` y `sys.database_audit_specifications`; confirme que todos tienen `is_state_enabled = 1`. Revise físicamente `C:\SQLLab2025\Audit`, espere unos segundos y ajuste la ruta de `sys.fn_get_audit_file` al nombre real de los archivos `.sqlaudit`. Para eventos de login, use conexiones SQL reales mediante `sqlcmd` o una nueva conexión de SSMS, no solamente `EXECUTE AS`.
 
+**Problema 3: `lab_reader` ve el nombre y el código sin enmascarar**
+
+- **Síntoma:** La consulta de `Reporting.v_LabOrderSummary` devuelve `Cliente de laboratorio 1` y `C00000000001` en la ventana que debería ser de `lab_reader`.
+- **Causa:** La ventana sigue conectada con la cuenta de Windows administradora, o el usuario tiene `UNMASK`, `CONTROL` o pertenece a `db_owner`.
+- **Corrección:** Confirme `SELECT SUSER_SNAME(), USER_NAME();`. El login debe ser `lab_reader`. Revise `sys.masked_columns` y que `db_lab_reader` no tenga `UNMASK`. Cierre la ventana y vuelva a conectarse con autenticación de SQL Server.
+
 ## Limpieza
 
 > Realice esta sección solamente si el instructor solicita revertir la práctica. En un entorno real, no elimine certificados, claves, respaldos ni archivos de auditoría sin cumplir los requisitos de retención, respaldo y recuperación.
@@ -1164,7 +1441,52 @@ GO
    GO
    ```
 
-3. Elimine los usuarios, roles y logins de prueba:
+3. Quite el enmascaramiento y devuelva la vista al conjunto de columnas anterior:
+
+   ```sql
+   USE Sql2025Lab;
+   GO
+
+   CREATE OR ALTER VIEW Reporting.v_LabOrderSummary
+   AS
+   SELECT
+       o.SalesOrderID,
+       c.CustomerCode,
+       c.CustomerName,
+       o.OrderDate,
+       o.OrderStatus,
+       o.TotalAmount
+   FROM dbo.LabSalesOrder AS o
+   INNER JOIN dbo.LabCustomer AS c
+       ON c.CustomerID = o.CustomerID;
+   GO
+
+   IF EXISTS
+   (
+       SELECT 1
+       FROM sys.masked_columns
+       WHERE object_id = OBJECT_ID(N'dbo.LabCustomer')
+         AND name = N'CustomerName'
+   )
+       ALTER TABLE dbo.LabCustomer ALTER COLUMN CustomerName DROP MASKED;
+   GO
+
+   IF EXISTS
+   (
+       SELECT 1
+       FROM sys.masked_columns
+       WHERE object_id = OBJECT_ID(N'dbo.LabCustomer')
+         AND name = N'CustomerCode'
+   )
+       ALTER TABLE dbo.LabCustomer ALTER COLUMN CustomerCode DROP MASKED;
+   GO
+
+   IF COL_LENGTH(N'dbo.LabCustomer', N'Email') IS NOT NULL
+       ALTER TABLE dbo.LabCustomer DROP COLUMN Email;
+   GO
+   ```
+
+4. Elimine los usuarios, roles y logins de prueba:
 
    ```sql
    USE Sql2025Lab;
@@ -1187,7 +1509,7 @@ GO
    GO
    ```
 
-4. No elimine el certificado ni la Database Master Key si `Sql2025Lab` continúa cifrada. Para retirar TDE se requiere una operación planificada, validada y potencialmente prolongada:
+5. No elimine el certificado ni la Database Master Key si `Sql2025Lab` continúa cifrada. Para retirar TDE se requiere una operación planificada, validada y potencialmente prolongada:
 
    ```sql
    USE master;
@@ -1198,9 +1520,9 @@ GO
    GO
    ```
 
-5. Espere hasta que `sys.dm_database_encryption_keys` indique que la base ya no está cifrada antes de considerar la eliminación de la Database Encryption Key o del certificado. No elimine la Database Master Key de `master` si puede ser utilizada por otros certificados, credenciales o componentes de la instancia.
+6. Espere hasta que `sys.dm_database_encryption_keys` indique que la base ya no está cifrada antes de considerar la eliminación de la Database Encryption Key o del certificado. No elimine la Database Master Key de `master` si puede ser utilizada por otros certificados, credenciales o componentes de la instancia.
 
-6. Elimine manualmente archivos de auditoría únicamente después de confirmar que la retención definida para el laboratorio ha concluido.
+7. Elimine manualmente archivos de auditoría únicamente después de confirmar que la retención definida para el laboratorio ha concluido.
 
 ## Resumen
 
@@ -1208,10 +1530,11 @@ En esta práctica se aplicaron controles complementarios de seguridad para `Sql2
 
 - Se crearon logins SQL, usuarios y roles personalizados con permisos mínimos.
 - Se separaron las capacidades de lectura, análisis y ejecución de procedimientos aprobados.
+- Se enmascararon `CustomerName`, `CustomerCode` y `Email` en `dbo.LabCustomer`. `lab_reader` ve la máscara y `lab_analyst` ve el valor original porque tiene `UNMASK`.
 - Se configuró SQL Server Audit para registrar autenticaciones y acciones relevantes sobre `Sales.Orders`.
 - Se revisaron los eventos mediante `sys.fn_get_audit_file`.
 - Se habilitó TDE usando una Database Master Key, un certificado de servidor y una Database Encryption Key con `AES_256`.
 - Se respaldó el certificado con su clave privada y se generó un respaldo de la base de datos.
 - Se verificó que el certificado y la clave privada son indispensables para restaurar una base protegida por TDE en otra instancia.
 
-La seguridad efectiva no depende de un único mecanismo. Los roles reducen el riesgo de privilegios excesivos, la auditoría genera evidencia para detección e investigación, y TDE protege los archivos físicos frente a accesos no autorizados al almacenamiento. Estos controles deben revisarse periódicamente y complementarse con seguridad de red, protección de identidades, copias externas de claves y pruebas de restauración.
+La seguridad efectiva no depende de un único mecanismo. Los roles reducen el riesgo de privilegios excesivos, el enmascaramiento oculta valores en el resultado de quien no tiene `UNMASK`, la auditoría genera evidencia para detección e investigación, y TDE protege los archivos físicos frente a accesos no autorizados al almacenamiento. Estos controles deben revisarse periódicamente y complementarse con seguridad de red, protección de identidades, copias externas de claves y pruebas de restauración.
