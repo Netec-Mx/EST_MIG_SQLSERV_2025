@@ -183,7 +183,7 @@ Resultado esperado:
    INNER JOIN sys.schemas AS s
        ON s.schema_id = o.schema_id
    WHERE (s.name = N'Reporting' AND o.name = N'usp_OrderSearch')
-      OR (s.name = N'Sales' AND o.name IN (N'Orders', N'OrderDetails'))
+      OR (s.name = N'Sales' AND o.name IN (N'Orders', N'OrderLines'))
    ORDER BY s.name, o.name;
    GO
    ```
@@ -205,7 +205,7 @@ Resultado esperado:
 
 - Existe la carpeta `C:\SQLLab2025\Scripts\Lab03`.
 - Los cinco archivos SQL y el informe Markdown han sido creados.
-- Se confirma la disponibilidad de `Reporting.usp_OrderSearch`, `Sales.Orders` y `Sales.OrderDetails`.
+- Se confirma la disponibilidad de `Reporting.usp_OrderSearch`, `Sales.Orders` y `Sales.OrderLines`.
 - Los resultados de la práctica 2 están localizados o se ha documentado su ausencia.
 
 **Verificación:**
@@ -223,7 +223,7 @@ FROM sys.objects AS o
 INNER JOIN sys.schemas AS s
     ON s.schema_id = o.schema_id
 WHERE (s.name = N'Reporting' AND o.name = N'usp_OrderSearch')
-   OR (s.name = N'Sales' AND o.name IN (N'Orders', N'OrderDetails'));
+   OR (s.name = N'Sales' AND o.name IN (N'Orders', N'OrderLines'));
 GO
 ```
 
@@ -346,7 +346,7 @@ El resultado debe estar vacío.
    INNER JOIN sys.columns AS c
        ON c.object_id = t.object_id
    WHERE SCHEMA_NAME(t.schema_id) = N'Sales'
-     AND t.name IN (N'Orders', N'OrderDetails')
+     AND t.name IN (N'Orders', N'OrderLines')
    ORDER BY t.name, c.column_id;
    GO
    ```
@@ -356,10 +356,10 @@ El resultado debe estar vacío.
    ```text
    Actúa como asistente de T-SQL para un entorno de laboratorio SQL Server 2025.
    Genera un borrador de consulta parametrizada de solo lectura para obtener ventas
-   por cliente y por período. Usa Sales.Orders y Sales.OrderDetails, relacionándolas
-   por OrderID. El período debe usar un límite inicial inclusivo y un límite final
-   exclusivo para evitar problemas de hora. Devuelve CustomerID, cantidad de pedidos,
-   unidades vendidas y total de ventas calculado como UnitPrice * Quantity.
+   por cliente y por período. Usa Sales.Orders y Sales.OrderLines, relacionándolas
+   por OrderId. El período debe usar un límite inicial inclusivo y un límite final
+   exclusivo para evitar problemas de hora. Devuelve CustomerId, cantidad de pedidos,
+   unidades vendidas y total de ventas calculado con LineAmount.
    No uses SELECT *, SQL dinámico, sugerencias de índice ni cambios DDL.
    Incluye supuestos sobre nombres de columnas y explica cómo validar la consulta.
    No recibiste datos reales ni resultados de negocio.
@@ -368,7 +368,7 @@ El resultado debe estar vacío.
 3. Revise la respuesta. La propuesta debe cumplir, como mínimo, estos criterios:
 
    - Declarar parámetros de fecha tipados.
-   - Usar `INNER JOIN` por `OrderID`.
+   - Usar `INNER JOIN` por `OrderId`.
    - Evitar `SELECT *`.
    - Usar fechas en formato ISO o parámetros `date`.
    - Aplicar un rango sargable:
@@ -393,24 +393,24 @@ El resultado debe estar vacío.
    USE Sql2025Lab;
    GO
 
-   DECLARE @StartDate date = '2026-01-01';
-   DECLARE @EndDate   date = '2026-02-01';
-
    SET STATISTICS IO ON;
    SET STATISTICS TIME ON;
    GO
 
+   DECLARE @StartDate date = '2025-01-01';
+   DECLARE @EndDate   date = '2025-02-01';
+
    SELECT
-       o.CustomerID,
-       COUNT_BIG(DISTINCT o.OrderID) AS OrderCount,
-       SUM(CONVERT(bigint, od.Quantity)) AS UnitsSold,
-       SUM(CONVERT(decimal(19,4), od.UnitPrice) * od.Quantity) AS TotalSales
+       o.CustomerId,
+       COUNT_BIG(DISTINCT o.OrderId) AS OrderCount,
+       SUM(CONVERT(bigint, ol.Quantity)) AS UnitsSold,
+       SUM(ol.LineAmount) AS TotalSales
    FROM Sales.Orders AS o
-   INNER JOIN Sales.OrderDetails AS od
-       ON od.OrderID = o.OrderID
+   INNER JOIN Sales.OrderLines AS ol
+       ON ol.OrderId = o.OrderId
    WHERE o.OrderDate >= @StartDate
      AND o.OrderDate < @EndDate
-   GROUP BY o.CustomerID
+   GROUP BY o.CustomerId
    ORDER BY TotalSales DESC;
    GO
 
@@ -451,6 +451,9 @@ Ejecute la siguiente consulta para comprobar que la instrucción se registró en
 USE Sql2025Lab;
 GO
 
+EXEC sys.sp_query_store_flush_db;
+GO
+
 SELECT TOP (10)
     q.query_id,
     p.plan_id,
@@ -466,7 +469,7 @@ INNER JOIN sys.query_store_plan AS p
 INNER JOIN sys.query_store_runtime_stats AS rs
     ON rs.plan_id = p.plan_id
 WHERE qt.query_sql_text LIKE N'%Sales.Orders%'
-  AND qt.query_sql_text LIKE N'%Sales.OrderDetails%'
+  AND qt.query_sql_text LIKE N'%Sales.OrderLines%'
 ORDER BY rs.last_execution_time DESC;
 GO
 ```
@@ -562,7 +565,8 @@ GO
    GO
 
    EXEC Reporting.usp_OrderSearch
-       @ParameterName = @TestValue;
+       @OrderDate = '2024-06-15',
+       @CustomerCode = 'C00000000001';
    GO
 
    SET STATISTICS IO OFF;
@@ -573,11 +577,11 @@ GO
 7. En el plan de ejecución real, seleccione un operador relevante, por ejemplo un `Index Scan`, `Index Seek`, `Key Lookup`, `Sort`, `Hash Match` o `Nested Loops`. Copie solo un resumen técnico no sensible, por ejemplo:
 
    ```text
-   Operador: Index Scan
-   Objeto: Sales.Orders
+   Operador: Index Seek
+   Objeto: dbo.LabSalesOrder
    Filas estimadas: 500
    Filas reales: 25 000
-   Predicado: función aplicada sobre OrderDate
+   Predicado: rango sobre OrderDate y filtro por CustomerCode
    Advertencias: ninguna
    ```
 
@@ -619,6 +623,9 @@ Ejecute esta consulta para revisar los planes de Query Store asociados a texto q
 USE Sql2025Lab;
 GO
 
+EXEC sys.sp_query_store_flush_db;
+GO
+
 SELECT TOP (20)
     q.query_id,
     p.plan_id,
@@ -635,8 +642,8 @@ INNER JOIN sys.query_store_plan AS p
     ON p.query_id = q.query_id
 INNER JOIN sys.query_store_runtime_stats AS rs
     ON rs.plan_id = p.plan_id
-WHERE qt.query_sql_text LIKE N'%OrderSearch%'
-   OR qt.query_sql_text LIKE N'%Sales.Orders%'
+WHERE qt.query_sql_text LIKE N'%usp_OrderSearch%'
+   OR qt.query_sql_text LIKE N'%LabSalesOrder%'
 ORDER BY rs.last_execution_time DESC;
 GO
 ```
@@ -662,11 +669,11 @@ GO
    ```
 
    ```sql
-   WHERE ISNULL(o.CustomerID, 0) = @CustomerID
+   WHERE ISNULL(o.CustomerId, 0) = @CustomerId
    ```
 
    ```sql
-   WHERE LEFT(o.SomeCode, 3) = @Prefix
+   WHERE LEFT(ol.ProductCode, 4) = @Prefix
    ```
 
 3. Si la práctica 2 no contiene un patrón no sargable utilizable, use este ejemplo de comparación de solo lectura con fechas:
@@ -675,7 +682,7 @@ GO
    USE Sql2025Lab;
    GO
 
-   DECLARE @OrderDate date = '2026-01-15';
+   DECLARE @OrderDate date = '2025-01-15';
    DECLARE @NextDate  date = DATEADD(day, 1, @OrderDate);
 
    -- Patrón no sargable: referencia una función sobre la columna filtrada.
@@ -718,28 +725,25 @@ GO
    USE Sql2025Lab;
    GO
 
-   DECLARE @OrderDate date = '2026-01-15';
-   DECLARE @NextDate  date = DATEADD(day, 1, @OrderDate);
-
    SET STATISTICS IO ON;
    SET STATISTICS TIME ON;
    GO
 
    BEGIN TRANSACTION;
-   GO
+
+   DECLARE @OrderDate date = '2025-01-15';
+   DECLARE @NextDate  date = DATEADD(day, 1, @OrderDate);
 
    SELECT
        COUNT_BIG(*) AS NonSargableCount
    FROM Sales.Orders AS o
    WHERE CONVERT(date, o.OrderDate) = @OrderDate;
-   GO
 
    SELECT
        COUNT_BIG(*) AS SargableCount
    FROM Sales.Orders AS o
    WHERE o.OrderDate >= @OrderDate
      AND o.OrderDate < @NextDate;
-   GO
 
    ROLLBACK TRANSACTION;
    GO
@@ -853,7 +857,7 @@ GO
 1. Identifique cuatro objetos que documentará. Deben incluir, como mínimo:
 
    - `Sales.Orders`
-   - `Sales.OrderDetails`
+   - `Sales.OrderLines`
    - `Reporting.usp_OrderSearch`
    - Un índice existente de `Sales.Orders`
 
@@ -888,7 +892,7 @@ GO
    No inventes columnas, índices, dependencias ni reglas de negocio.
    Objetos a documentar:
    - Sales.Orders (tabla)
-   - Sales.OrderDetails (tabla)
+   - Sales.OrderLines (tabla)
    - Reporting.usp_OrderSearch (procedimiento almacenado)
    - [NOMBRE DEL ÍNDICE] sobre Sales.Orders
    ```
@@ -973,21 +977,21 @@ GO
        N'Sales.Orders',
        N'TABLE',
        N'Almacena pedidos del laboratorio. El propósito exacto debe ser confirmado con las columnas y reglas de negocio disponibles.',
-       N'Referenciado por Sales.OrderDetails y por procedimientos o consultas que recuperan pedidos.',
+       N'Referenciado por Sales.OrderLines mediante OrderId y la clave FK_OrderLines_Orders.',
        N'Alto: modificar columnas, claves o tipos puede afectar uniones, procedimientos, informes, índices y cargas.'
    ),
    (
-       N'Sales.OrderDetails',
+       N'Sales.OrderLines',
        N'TABLE',
        N'Almacena líneas o detalles asociados a pedidos del laboratorio.',
-       N'Depende funcionalmente de Sales.Orders mediante OrderID; confirmar restricciones y relaciones en metadatos.',
+       N'Depende de Sales.Orders mediante OrderId y la clave foránea FK_OrderLines_Orders.',
        N'Alto: cambios en cantidades, precios o claves pueden afectar agregados de ventas y resultados históricos.'
    ),
    (
        N'Reporting.usp_OrderSearch',
        N'SQL_STORED_PROCEDURE',
        N'Procedimiento de consulta para búsqueda o recuperación de pedidos. El comportamiento exacto se valida mediante su definición.',
-       N'Dependencias obtenidas desde sys.sql_expression_dependencies y revisión de la definición.',
+       N'Consulta dbo.LabCustomer y dbo.LabSalesOrder. No lee Sales.Orders ni Sales.OrderLines.',
        N'Medio/alto: cambios de parámetros, filtros o tipos pueden alterar resultados, planes de ejecución y consumidores de informes.'
    ),
    (
@@ -1071,8 +1075,8 @@ GO
        CASE
            WHEN d.ObjectName = N'Sales.Orders'
                 AND OBJECT_ID(N'Sales.Orders', N'U') IS NOT NULL THEN N'Válido'
-           WHEN d.ObjectName = N'Sales.OrderDetails'
-                AND OBJECT_ID(N'Sales.OrderDetails', N'U') IS NOT NULL THEN N'Válido'
+           WHEN d.ObjectName = N'Sales.OrderLines'
+                AND OBJECT_ID(N'Sales.OrderLines', N'U') IS NOT NULL THEN N'Válido'
            WHEN d.ObjectName = N'Reporting.usp_OrderSearch'
                 AND OBJECT_ID(N'Reporting.usp_OrderSearch', N'P') IS NOT NULL THEN N'Válido'
            WHEN d.ObjectType = N'INDEX'

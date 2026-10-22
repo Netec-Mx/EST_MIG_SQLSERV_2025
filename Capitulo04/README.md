@@ -4,11 +4,11 @@
 
 | Duration | Complexity | Bloom level |
 |---|---|---|
-| 40 minutos | Medio | Aplicar |
+| 70 minutos | Medio | Aplicar |
 
 ## Descripción General
 
-En esta práctica se evalúa la configuración de rendimiento de la instancia predeterminada `MSSQLSERVER` sobre Windows Server 2022 y se compara con una línea base controlada. Se revisan memoria, CPU, paralelismo, almacenamiento, TempDB, configuración de energía e Instant File Initialization (IFI), para después aplicar ajustes básicos y reversibles de SQL Server.
+En esta práctica se evalúa la configuración de rendimiento de la instancia predeterminada `MSSQLSERVER` sobre Windows Server 2022 y se compara con una línea base controlada. Se revisan memoria, CPU, paralelismo, almacenamiento, TempDB, configuración de energía e Instant File Initialization (IFI), para después aplicar ajustes básicos y reversibles de SQL Server. Al final se aísla la carga de reportes con Resource Governor y se retira esa configuración antes de cerrar el laboratorio.
 
 La práctica utiliza los valores iniciales definidos para el laboratorio: `max server memory = 16384 MB`, `MAXDOP = 4` y `cost threshold for parallelism = 50`. Windows Server 2025 se analiza únicamente como contexto tecnológico; todas las validaciones prácticas de este laboratorio se ejecutan en Windows Server 2022 Datacenter 21H2, build `20348.2402`. No se deben atribuir al sistema operativo instalado características exclusivas de Windows Server 2025, como mejoras específicas de Hyper-V, dMSA, SMB sobre QUIC u hotpatching.
 
@@ -18,6 +18,7 @@ La práctica utiliza los valores iniciales definidos para el laboratorio: `max s
 - [ ] Aplicar valores controlados de memoria máxima, `MAXDOP` y `cost threshold for parallelism` en la instancia `MSSQLSERVER`.
 - [ ] Validar que `tempdb` dispone de cuatro archivos de datos con tamaño y crecimiento homogéneos.
 - [ ] Ejecutar y comparar las consultas de carga de la práctica 2 mediante indicadores de Query Store, tiempo, lecturas y E/S.
+- [ ] Clasificar la sesión de reportes en un grupo de Resource Governor y comprobar el grupo, el pool y el `MAXDOP` efectivo.
 - [ ] Distinguir entre configuraciones aplicables al laboratorio Windows Server 2022 y capacidades que requerirían una evaluación separada en Windows Server 2025.
 
 ## Prerrequisitos
@@ -43,7 +44,7 @@ La práctica utiliza los valores iniciales definidos para el laboratorio: `max s
 - Usar la base de datos `Sql2025Lab`, configurada con nivel de compatibilidad `170`, modelo de recuperación `FULL` y Query Store en estado `READ_WRITE`.
 - No modificar afinidad de CPU, trace flags globales, configuración de procesadores, configuración de red, políticas corporativas de energía ni parámetros avanzados no justificados.
 
-> **Advertencia de seguridad:** las credenciales `lab_sa`, `lab_reader` y `lab_analyst` son exclusivas del laboratorio. No incluya contraseñas en capturas, repositorios, conversaciones con GitHub Copilot Chat ni documentación externa. Cambie las contraseñas temporales antes de reutilizar el entorno.
+> **Advertencia de seguridad:** las credenciales `lab_sa`, `lab_reader`, `lab_analyst` y `lab_reports` son exclusivas del laboratorio. No incluya contraseñas en capturas, repositorios, conversaciones con GitHub Copilot Chat ni documentación externa. Cambie las contraseñas temporales antes de reutilizar el entorno.
 
 ## Entorno de Laboratorio
 
@@ -80,6 +81,21 @@ $LabFolders = @(
 )
 
 New-Item -ItemType Directory -Path $LabFolders -Force | Out-Null
+
+$SqlManagedFolders = @(
+    'C:\SQLLab2025\Data',
+    'C:\SQLLab2025\Logs',
+    'C:\SQLLab2025\Backups',
+    'C:\SQLLab2025\Audit',
+    'C:\SQLLab2025\XEvents'
+)
+
+foreach ($Folder in $SqlManagedFolders) {
+    icacls $Folder /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "No se pudo conceder modificación a NT SERVICE\MSSQLSERVER en $Folder."
+    }
+}
 ```
 
 Compruebe que el servicio SQL Server está iniciado y que el puerto esperado responde:
@@ -171,9 +187,8 @@ GO
 5. Si la cuenta de servicio no dispone de permisos sobre `C:\SQLLab2025\Data` y `C:\SQLLab2025\Logs`, concédalos desde una consola PowerShell elevada. Sustituya la cuenta por el valor real mostrado en la consulta anterior.
 
 ```powershell
-## Ejemplo: ajustar el nombre de cuenta al valor real de service_account.
-icacls "C:\SQLLab2025\Data" /grant "NT SERVICE\MSSQLSERVER:(OI)(CI)M"
-icacls "C:\SQLLab2025\Logs" /grant "NT SERVICE\MSSQLSERVER:(OI)(CI)M"
+icacls "C:\SQLLab2025\Data" /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"'
+icacls "C:\SQLLab2025\Logs" /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"'
 ```
 
 **Resultado esperado**
@@ -262,6 +277,10 @@ GO
 
 DECLARE @SnapshotLabel varchar(20) = 'Baseline';
 DECLARE @SnapshotDateTime datetime2(0) = SYSDATETIME();
+
+DELETE FROM dbo.Lab04_ConfigSnapshot WHERE SnapshotLabel = @SnapshotLabel;
+DELETE FROM dbo.Lab04_MemorySnapshot WHERE SnapshotLabel = @SnapshotLabel;
+DELETE FROM dbo.Lab04_IOSnapshot WHERE SnapshotLabel = @SnapshotLabel;
 
 INSERT INTO dbo.Lab04_ConfigSnapshot
 (
@@ -701,37 +720,7 @@ ORDER BY type_desc, file_id;
 GO
 ```
 
-2. Antes de ejecutar el cambio, confirme que `tempdb` tiene únicamente un archivo de datos y un archivo de log. El siguiente control detiene el proceso si existen archivos adicionales, porque eliminarlos o reorganizarlos requiere análisis específico.
-
-```sql
-USE master;
-GO
-
-IF
-(
-    SELECT COUNT(*)
-    FROM sys.master_files
-    WHERE database_id = DB_ID(N'tempdb')
-      AND type_desc = N'ROWS'
-) > 1
-OR
-(
-    SELECT COUNT(*)
-    FROM sys.master_files
-    WHERE database_id = DB_ID(N'tempdb')
-      AND type_desc = N'LOG'
-) > 1
-BEGIN
-    THROW 50001, 'TempDB tiene archivos adicionales. No ejecute la configuración automática; revise la distribución actual antes de continuar.', 1;
-END;
-GO
-```
-
-3. Si el control anterior no genera error, ejecute el siguiente script. Este script:
-   - Configura el archivo de datos principal `tempdev`.
-   - Configura el archivo de log `templog`.
-   - Agrega tres archivos de datos adicionales.
-   - Deja preparados los nuevos nombres físicos para el próximo inicio del servicio.
+2. El script siguiente deja `tempdb` con los cuatro archivos de datos del laboratorio, aunque la instalación inicial ya haya creado varios. Los archivos de datos que no formen parte de ese conjunto se vacían y se eliminan. No elimina el archivo principal `tempdev` ni el log `templog`.
 
 ```sql
 USE master;
@@ -757,48 +746,121 @@ MODIFY FILE
 );
 GO
 
-ALTER DATABASE tempdb
-ADD FILE
+IF NOT EXISTS
 (
-    NAME = N'tempdev2',
-    FILENAME = N'C:\SQLLab2025\Data\tempdb2.ndf',
-    SIZE = 1024MB,
-    FILEGROWTH = 256MB
-);
+    SELECT 1
+    FROM sys.master_files
+    WHERE database_id = DB_ID(N'tempdb')
+      AND name = N'tempdev2'
+)
+    ALTER DATABASE tempdb ADD FILE
+    (
+        NAME = N'tempdev2',
+        FILENAME = N'C:\SQLLab2025\Data\tempdb2.ndf',
+        SIZE = 1024MB,
+        FILEGROWTH = 256MB
+    );
+ELSE
+    ALTER DATABASE tempdb MODIFY FILE
+    (
+        NAME = N'tempdev2',
+        FILENAME = N'C:\SQLLab2025\Data\tempdb2.ndf',
+        SIZE = 1024MB,
+        FILEGROWTH = 256MB
+    );
 GO
 
-ALTER DATABASE tempdb
-ADD FILE
+IF NOT EXISTS
 (
-    NAME = N'tempdev3',
-    FILENAME = N'C:\SQLLab2025\Data\tempdb3.ndf',
-    SIZE = 1024MB,
-    FILEGROWTH = 256MB
-);
+    SELECT 1
+    FROM sys.master_files
+    WHERE database_id = DB_ID(N'tempdb')
+      AND name = N'tempdev3'
+)
+    ALTER DATABASE tempdb ADD FILE
+    (
+        NAME = N'tempdev3',
+        FILENAME = N'C:\SQLLab2025\Data\tempdb3.ndf',
+        SIZE = 1024MB,
+        FILEGROWTH = 256MB
+    );
+ELSE
+    ALTER DATABASE tempdb MODIFY FILE
+    (
+        NAME = N'tempdev3',
+        FILENAME = N'C:\SQLLab2025\Data\tempdb3.ndf',
+        SIZE = 1024MB,
+        FILEGROWTH = 256MB
+    );
 GO
 
-ALTER DATABASE tempdb
-ADD FILE
+IF NOT EXISTS
 (
-    NAME = N'tempdev4',
-    FILENAME = N'C:\SQLLab2025\Data\tempdb4.ndf',
-    SIZE = 1024MB,
-    FILEGROWTH = 256MB
-);
+    SELECT 1
+    FROM sys.master_files
+    WHERE database_id = DB_ID(N'tempdb')
+      AND name = N'tempdev4'
+)
+    ALTER DATABASE tempdb ADD FILE
+    (
+        NAME = N'tempdev4',
+        FILENAME = N'C:\SQLLab2025\Data\tempdb4.ndf',
+        SIZE = 1024MB,
+        FILEGROWTH = 256MB
+    );
+ELSE
+    ALTER DATABASE tempdb MODIFY FILE
+    (
+        NAME = N'tempdev4',
+        FILENAME = N'C:\SQLLab2025\Data\tempdb4.ndf',
+        SIZE = 1024MB,
+        FILEGROWTH = 256MB
+    );
+GO
+
+DECLARE @ExtraFile sysname;
+DECLARE @Sql nvarchar(500);
+
+WHILE EXISTS
+(
+    SELECT 1
+    FROM sys.master_files
+    WHERE database_id = DB_ID(N'tempdb')
+      AND type_desc = N'ROWS'
+      AND name NOT IN (N'tempdev', N'tempdev2', N'tempdev3', N'tempdev4')
+)
+BEGIN
+    SET @ExtraFile =
+    (
+        SELECT TOP (1) name
+        FROM sys.master_files
+        WHERE database_id = DB_ID(N'tempdb')
+          AND type_desc = N'ROWS'
+          AND name NOT IN (N'tempdev', N'tempdev2', N'tempdev3', N'tempdev4')
+        ORDER BY file_id DESC
+    );
+
+    SET @Sql =
+        N'DBCC SHRINKFILE (N' + QUOTENAME(@ExtraFile, '''') + N', EMPTYFILE); '
+        + N'ALTER DATABASE tempdb REMOVE FILE ' + QUOTENAME(@ExtraFile) + N';';
+
+    EXEC sys.sp_executesql @Sql;
+END;
 GO
 ```
 
-4. Reinicie el servicio SQL Server para que el cambio de ruta del archivo principal y del archivo de log de `tempdb` se materialice. Hágalo desde PowerShell elevado:
+3. Reinicie el servicio SQL Server para que el cambio de ruta de `tempdev` y `templog` se materialice. Hágalo desde PowerShell elevado y vuelva a iniciar SQL Server Agent:
 
 ```powershell
 Restart-Service -Name MSSQLSERVER -Force
+Start-Service -Name SQLSERVERAGENT
 
-Get-Service -Name MSSQLSERVER
+Get-Service -Name MSSQLSERVER, SQLSERVERAGENT
 Test-NetConnection -ComputerName localhost -Port 1433
 ```
 
-5. Espere a que el servicio alcance el estado `Running`.
-6. Reconéctese con SSMS y valide los archivos efectivos:
+4. Espere a que el servicio alcance el estado `Running`.
+5. Reconéctese con SSMS y valide los archivos efectivos:
 
 ```sql
 USE tempdb;
@@ -819,7 +881,7 @@ ORDER BY type_desc, file_id;
 GO
 ```
 
-7. Compruebe que los parámetros de memoria y paralelismo siguen en uso tras reiniciar el servicio:
+6. Compruebe que los parámetros de memoria y paralelismo siguen en uso tras reiniciar el servicio:
 
 ```sql
 SELECT
@@ -876,14 +938,7 @@ La fila `ROWS` debe mostrar `FileCount = 4`, tamaños homogéneos de aproximadam
 
 **Instrucciones**
 
-1. Abra los scripts de carga utilizados en la práctica 2 desde `C:\SQLLab2025\Scripts`.
-2. Antes de ejecutar cada consulta representativa, agregue un comentario identificador al inicio. Esto permite localizar la ejecución en Query Store sin exponer datos sensibles.
-
-```sql
-/* LAB04_WORKLOAD */
-```
-
-3. Active estadísticas de tiempo y E/S para la sesión de prueba:
+1. Ejecute la misma carga posterior de la práctica 2. Los procedimientos leen `dbo.LabSalesOrder` y `dbo.LabCustomer`. El comentario queda dentro del texto enviado a SQL Server para poder localizarlo en Query Store.
 
 ```sql
 USE Sql2025Lab;
@@ -893,11 +948,34 @@ SET NOCOUNT ON;
 SET STATISTICS IO ON;
 SET STATISTICS TIME ON;
 GO
+
+EXEC sys.sp_executesql N'
+/* LAB04_WORKLOAD */
+EXEC Reporting.usp_SalesByCustomerRange
+    @CustomerIDFrom = 1,
+    @CustomerIDTo = 25;
+';
+
+EXEC sys.sp_executesql N'
+/* LAB04_WORKLOAD */
+EXEC Reporting.usp_OrderSearch
+    @OrderDate = ''2024-06-15'',
+    @CustomerCode = ''C00000000001'';
+';
+
+EXEC sys.sp_executesql N'
+/* LAB04_WORKLOAD */
+EXEC Reporting.usp_MonthlySalesSummary
+    @Year = 2024;
+';
+GO
+
+SET STATISTICS IO OFF;
+SET STATISTICS TIME OFF;
+GO
 ```
 
-4. Ejecute las mismas consultas de prueba de la práctica 2 con los mismos parámetros, orden y número de repeticiones utilizados para el baseline.
-
-5. Registre para cada ejecución:
+2. Registre para cada ejecución:
    - Duración total.
    - CPU time mostrado por `SET STATISTICS TIME`.
    - Logical reads mostradas por `SET STATISTICS IO`.
@@ -905,18 +983,13 @@ GO
    - Plan de ejecución real, si fue utilizado en la práctica 2.
    - Observaciones sobre operadores paralelos, spills, scans o advertencias.
 
-6. Desactive las estadísticas al finalizar:
-
-```sql
-SET STATISTICS IO OFF;
-SET STATISTICS TIME OFF;
-GO
-```
-
-7. Consulte Query Store para revisar las consultas etiquetadas. Ajuste el intervalo de tiempo si fuera necesario.
+3. Consulte Query Store para revisar las consultas etiquetadas.
 
 ```sql
 USE Sql2025Lab;
+GO
+
+EXEC sys.sp_query_store_flush_db;
 GO
 
 SELECT TOP (20)
@@ -941,30 +1014,45 @@ ORDER BY rs.last_execution_time DESC, rs.avg_duration DESC;
 GO
 ```
 
-8. Revise si las consultas generan planes paralelos. El siguiente script identifica operadores paralelos en planes capturados por Query Store:
+4. Revise si los procedimientos de la práctica 2 generan planes paralelos:
 
 ```sql
 USE Sql2025Lab;
 GO
 
+EXEC sys.sp_query_store_flush_db;
+GO
+
 SELECT TOP (20)
     q.query_id,
     p.plan_id,
-    p.last_execution_time,
-    p.avg_duration / 1000.0 AS AvgDurationMS,
+    rs.last_execution_time,
+    CAST(rs.avg_duration / 1000.0 AS decimal(18,2)) AS AvgDurationMS,
+    OBJECT_NAME(q.object_id) AS Procedimiento,
     qt.query_sql_text
 FROM sys.query_store_plan AS p
 INNER JOIN sys.query_store_query AS q
     ON p.query_id = q.query_id
 INNER JOIN sys.query_store_query_text AS qt
     ON q.query_text_id = qt.query_text_id
-WHERE qt.query_sql_text LIKE N'%LAB04_WORKLOAD%'
+INNER JOIN sys.query_store_runtime_stats AS rs
+    ON rs.plan_id = p.plan_id
+WHERE
+(
+    qt.query_sql_text LIKE N'%LAB04_WORKLOAD%'
+    OR q.object_id IN
+    (
+        OBJECT_ID(N'Reporting.usp_SalesByCustomerRange'),
+        OBJECT_ID(N'Reporting.usp_OrderSearch'),
+        OBJECT_ID(N'Reporting.usp_MonthlySalesSummary')
+    )
+)
   AND CAST(p.query_plan AS nvarchar(max)) LIKE N'%Parallelism%'
-ORDER BY p.last_execution_time DESC;
+ORDER BY rs.last_execution_time DESC;
 GO
 ```
 
-9. No fuerce un plan en Query Store durante esta práctica. El objetivo es observar el efecto de los ajustes de instancia, no reemplazar el proceso de análisis de planes, estadísticas e índices realizado en prácticas posteriores.
+5. No fuerce un plan en Query Store durante esta práctica. El objetivo es observar el efecto de los ajustes de instancia, no reemplazar el proceso de análisis de planes, estadísticas e índices realizado en prácticas posteriores.
 
 **Resultado esperado**
 
@@ -979,6 +1067,9 @@ Ejecute la siguiente consulta. Debe retornar al menos una ejecución de carga si
 
 ```sql
 USE Sql2025Lab;
+GO
+
+EXEC sys.sp_query_store_flush_db;
 GO
 
 SELECT
@@ -1011,6 +1102,10 @@ GO
 
 DECLARE @SnapshotLabel varchar(20) = 'PostChange';
 DECLARE @SnapshotDateTime datetime2(0) = SYSDATETIME();
+
+DELETE FROM dbo.Lab04_ConfigSnapshot WHERE SnapshotLabel = @SnapshotLabel;
+DELETE FROM dbo.Lab04_MemorySnapshot WHERE SnapshotLabel = @SnapshotLabel;
+DELETE FROM dbo.Lab04_IOSnapshot WHERE SnapshotLabel = @SnapshotLabel;
 
 INSERT INTO dbo.Lab04_ConfigSnapshot
 (
@@ -1218,6 +1313,361 @@ FROM sys.database_files;
 GO
 ```
 
+---
+
+### Paso 8: Aislar la carga de reportes con Resource Governor
+
+**Objetivo:** crear un pool y un grupo de carga para el login de reportes, comprobar que esa sesión queda clasificada fuera del grupo `default` y retirar la configuración al terminar.
+
+Resource Governor está disponible en la edición Developer del laboratorio. Mientras permanece habilitado, la clasificación aplica a toda la instancia. Este paso termina con el script de retiro.
+
+**Instrucciones**
+
+1. Confirme la edición y que existen los procedimientos de la práctica 2:
+
+```sql
+IF CAST(SERVERPROPERTY('EngineEdition') AS int) <> 3
+    THROW 50001, N'Resource Governor requiere la edición Developer, Enterprise o Evaluation.', 1;
+GO
+
+USE Sql2025Lab;
+GO
+
+IF OBJECT_ID(N'Reporting.usp_MonthlySalesSummary', N'P') IS NULL
+   OR OBJECT_ID(N'Reporting.usp_SalesByCustomerRange', N'P') IS NULL
+   OR OBJECT_ID(N'Reporting.usp_OrderSearch', N'P') IS NULL
+    THROW 50002, N'Faltan procedimientos de la práctica 2. Complete esa práctica antes de continuar.', 1;
+GO
+```
+
+2. Cree el login `lab_reports` y concédale solo la ejecución de los tres procedimientos. La contraseña es exclusiva de este taller:
+
+```sql
+USE master;
+GO
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.server_principals
+    WHERE name = N'lab_reports'
+)
+BEGIN
+    CREATE LOGIN lab_reports
+        WITH PASSWORD = N'LabReports2025!ChangeMe',
+             CHECK_POLICY = ON,
+             CHECK_EXPIRATION = OFF;
+END
+GO
+
+USE Sql2025Lab;
+GO
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.database_principals
+    WHERE name = N'lab_reports'
+)
+    CREATE USER lab_reports FOR LOGIN lab_reports;
+GO
+
+GRANT EXECUTE ON OBJECT::Reporting.usp_SalesByCustomerRange TO lab_reports;
+GRANT EXECUTE ON OBJECT::Reporting.usp_OrderSearch TO lab_reports;
+GRANT EXECUTE ON OBJECT::Reporting.usp_MonthlySalesSummary TO lab_reports;
+GO
+```
+
+3. Cree la función clasificadora en `master`. Debe devolver el nombre del grupo y estar enlazada a esquema. `ORIGINAL_LOGIN()` identifica al login que abrió la sesión:
+
+```sql
+USE master;
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_Lab04_Classifier()
+RETURNS sysname
+WITH SCHEMABINDING
+AS
+BEGIN
+    DECLARE @WorkloadGroup sysname = N'default';
+
+    IF ORIGINAL_LOGIN() = N'lab_reports'
+        SET @WorkloadGroup = N'GroupReportes';
+
+    RETURN @WorkloadGroup;
+END;
+GO
+```
+
+4. Cree el pool y el grupo, asigne la función y aplique la configuración. `CAP_CPU_PERCENT = 20` limita el CPU del pool. `MAX_DOP = 1` impide paralelismo dentro del grupo de reportes:
+
+```sql
+USE master;
+GO
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.resource_governor_resource_pools
+    WHERE name = N'PoolReportes'
+)
+BEGIN
+    CREATE RESOURCE POOL PoolReportes
+    WITH
+    (
+        MIN_CPU_PERCENT = 0,
+        MAX_CPU_PERCENT = 30,
+        CAP_CPU_PERCENT = 20,
+        MIN_MEMORY_PERCENT = 0,
+        MAX_MEMORY_PERCENT = 25
+    );
+END
+ELSE
+BEGIN
+    ALTER RESOURCE POOL PoolReportes
+    WITH
+    (
+        MIN_CPU_PERCENT = 0,
+        MAX_CPU_PERCENT = 30,
+        CAP_CPU_PERCENT = 20,
+        MIN_MEMORY_PERCENT = 0,
+        MAX_MEMORY_PERCENT = 25
+    );
+END
+GO
+
+IF NOT EXISTS
+(
+    SELECT 1
+    FROM sys.resource_governor_workload_groups
+    WHERE name = N'GroupReportes'
+)
+BEGIN
+    CREATE WORKLOAD GROUP GroupReportes
+    WITH
+    (
+        IMPORTANCE = LOW,
+        REQUEST_MAX_MEMORY_GRANT_PERCENT = 25,
+        MAX_DOP = 1,
+        GROUP_MAX_REQUESTS = 5
+    )
+    USING PoolReportes;
+END
+ELSE
+BEGIN
+    ALTER WORKLOAD GROUP GroupReportes
+    WITH
+    (
+        IMPORTANCE = LOW,
+        REQUEST_MAX_MEMORY_GRANT_PERCENT = 25,
+        MAX_DOP = 1,
+        GROUP_MAX_REQUESTS = 5
+    )
+    USING PoolReportes;
+END
+GO
+
+ALTER RESOURCE GOVERNOR
+    WITH (CLASSIFIER_FUNCTION = dbo.fn_Lab04_Classifier);
+GO
+
+ALTER RESOURCE GOVERNOR RECONFIGURE;
+GO
+
+ALTER RESOURCE GOVERNOR RESET STATISTICS;
+GO
+```
+
+5. Compruebe que Resource Governor quedó habilitado y que el grupo usa el pool previsto:
+
+```sql
+SELECT
+    is_enabled,
+    OBJECT_SCHEMA_NAME(classifier_function_id, DB_ID(N'master')) AS ClassifierSchema,
+    OBJECT_NAME(classifier_function_id, DB_ID(N'master')) AS ClassifierName
+FROM sys.resource_governor_configuration;
+GO
+
+SELECT
+    g.name AS WorkloadGroup,
+    p.name AS ResourcePool,
+    g.importance,
+    g.max_dop,
+    g.group_max_requests,
+    p.min_cpu_percent,
+    p.max_cpu_percent,
+    p.cap_cpu_percent,
+    p.max_memory_percent
+FROM sys.resource_governor_workload_groups AS g
+INNER JOIN sys.resource_governor_resource_pools AS p
+    ON p.pool_id = g.pool_id
+WHERE g.name IN (N'default', N'GroupReportes');
+GO
+```
+
+6. Abra una segunda conexión de SSMS hacia `LOCALHOST,1433` con autenticación de SQL Server, login `lab_reports` y base de datos `Sql2025Lab`. En esa ventana ejecute:
+
+```sql
+SELECT
+    @@SPID AS SessionId,
+    ORIGINAL_LOGIN() AS OriginalLogin,
+    g.name AS WorkloadGroup,
+    p.name AS ResourcePool
+FROM sys.dm_exec_sessions AS s
+INNER JOIN sys.resource_governor_workload_groups AS g
+    ON g.group_id = s.group_id
+INNER JOIN sys.resource_governor_resource_pools AS p
+    ON p.pool_id = g.pool_id
+WHERE s.session_id = @@SPID;
+GO
+
+EXEC Reporting.usp_MonthlySalesSummary
+    @Year = 2024;
+GO
+```
+
+7. En la ventana de administrador, con autenticación de Windows, ejecute la misma consulta de clasificación. El grupo debe ser `default`. Después inicie en la ventana de `lab_reports` este lote, que mantiene una solicitud activa unos segundos:
+
+```sql
+DECLARE @i int = 0;
+DECLARE @n float = 0;
+
+WHILE @i < 5000000
+BEGIN
+    SET @n = SQRT(@i + 1);
+    SET @i += 1;
+END
+```
+
+8. Mientras el lote sigue en ejecución, consulte desde la ventana de administrador:
+
+```sql
+SELECT
+    s.session_id,
+    s.login_name,
+    g.name AS WorkloadGroup,
+    p.name AS ResourcePool,
+    r.status,
+    r.dop,
+    r.cpu_time,
+    r.granted_query_memory
+FROM sys.dm_exec_sessions AS s
+INNER JOIN sys.dm_exec_requests AS r
+    ON r.session_id = s.session_id
+INNER JOIN sys.resource_governor_workload_groups AS g
+    ON g.group_id = s.group_id
+INNER JOIN sys.resource_governor_resource_pools AS p
+    ON p.pool_id = g.pool_id
+WHERE s.login_name = N'lab_reports';
+GO
+```
+
+9. Cuando el lote termine, revise los contadores del grupo y anote el resultado en el informe:
+
+```sql
+SELECT
+    name AS WorkloadGroup,
+    total_request_count,
+    active_request_count,
+    total_cpu_usage_ms
+FROM sys.dm_resource_governor_workload_groups
+WHERE name IN (N'default', N'GroupReportes');
+GO
+```
+
+10. Cierre la ventana de `lab_reports`. En la ventana de administrador, retire Resource Governor. Si el grupo no se puede eliminar, compruebe que no queden sesiones de ese login y ejecute el script otra vez:
+
+```sql
+USE master;
+GO
+
+ALTER RESOURCE GOVERNOR WITH (CLASSIFIER_FUNCTION = NULL);
+GO
+
+ALTER RESOURCE GOVERNOR RECONFIGURE;
+GO
+
+ALTER RESOURCE GOVERNOR DISABLE;
+GO
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.resource_governor_workload_groups
+    WHERE name = N'GroupReportes'
+)
+    DROP WORKLOAD GROUP GroupReportes;
+GO
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.resource_governor_resource_pools
+    WHERE name = N'PoolReportes'
+)
+    DROP RESOURCE POOL PoolReportes;
+GO
+
+DROP FUNCTION IF EXISTS dbo.fn_Lab04_Classifier;
+GO
+
+USE Sql2025Lab;
+GO
+
+DROP USER IF EXISTS lab_reports;
+GO
+
+USE master;
+GO
+
+IF EXISTS
+(
+    SELECT 1
+    FROM sys.server_principals
+    WHERE name = N'lab_reports'
+)
+    DROP LOGIN lab_reports;
+GO
+```
+
+**Resultado esperado**
+
+- `sys.resource_governor_configuration.is_enabled` es `1` mientras el taller está activo y la función clasificadora es `dbo.fn_Lab04_Classifier`.
+- La sesión de `lab_reports` muestra `GroupReportes` y `PoolReportes`.
+- La sesión de administrador permanece en el grupo `default`.
+- `Reporting.usp_MonthlySalesSummary` se ejecuta con el login de reportes y devuelve el resumen del año 2024.
+- La solicitud activa de `lab_reports` muestra `dop = 1`.
+- `GroupReportes.total_request_count` es mayor que cero.
+- Después del retiro, Resource Governor queda deshabilitado y ya no existen `PoolReportes`, `GroupReportes`, la función ni el login `lab_reports`.
+
+**Verificación**
+
+Después del punto 10, esta consulta debe devolver `is_enabled = 0` y cero filas de objetos del taller:
+
+```sql
+SELECT is_enabled
+FROM sys.resource_governor_configuration;
+GO
+
+SELECT name
+FROM sys.resource_governor_resource_pools
+WHERE name = N'PoolReportes'
+UNION ALL
+SELECT name
+FROM sys.resource_governor_workload_groups
+WHERE name = N'GroupReportes';
+GO
+
+SELECT name
+FROM sys.server_principals
+WHERE name = N'lab_reports';
+GO
+```
+
+> **Nota:** en un equipo con muchos procesadores, un solo lote en serie puede no llegar al tope de CPU del pool. La evidencia obligatoria de este taller es la clasificación de la sesión y el `MAXDOP` del grupo, no una diferencia de duración.
+
+---
+
 ## Validación y Pruebas
 
 La práctica se considera completada cuando se cumplen los siguientes criterios:
@@ -1232,6 +1682,7 @@ La práctica se considera completada cuando se cumplen los siguientes criterios:
 | Rutas | Archivos de datos TempDB en `C:\SQLLab2025\Data` y archivo de log en `C:\SQLLab2025\Logs`. |
 | Evidencia | Existen snapshots `Baseline` y `PostChange` en las tablas `dbo.Lab04_*`. |
 | Carga | Las consultas de la práctica 2 fueron ejecutadas y registradas en Query Store mediante `LAB04_WORKLOAD`. |
+| Resource Governor | Durante el taller, `lab_reports` queda en `GroupReportes` y `PoolReportes`, con `dop = 1`. Al finalizar, `is_enabled = 0` y no quedan el pool, el grupo, la función ni el login. |
 | Sistema operativo | Se documentó el plan de energía, memoria disponible y contadores básicos de disco y CPU. |
 | Contexto tecnológico | El informe indica que las pruebas se realizaron sobre Windows Server 2022 build `20348.2402`. |
 
@@ -1281,8 +1732,8 @@ Test-Path 'C:\SQLLab2025\Logs'
 3. Conceda permisos Modify a la cuenta de servicio correcta:
 
 ```powershell
-icacls "C:\SQLLab2025\Data" /grant "NT SERVICE\MSSQLSERVER:(OI)(CI)M"
-icacls "C:\SQLLab2025\Logs" /grant "NT SERVICE\MSSQLSERVER:(OI)(CI)M"
+icacls "C:\SQLLab2025\Data" /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"'
+icacls "C:\SQLLab2025\Logs" /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"'
 ```
 
 4. Revise el SQL Server Error Log para identificar el archivo específico.
@@ -1315,18 +1766,79 @@ FROM sys.database_query_store_options;
 GO
 ```
 
-2. Ejecute la consulta de carga dentro de `Sql2025Lab` y agregue el comentario en el texto enviado a SQL Server:
+2. Ejecute de nuevo la carga de la práctica 2. El comentario debe ir dentro del texto que recibe SQL Server:
 
 ```sql
 USE Sql2025Lab;
 GO
 
+EXEC sys.sp_executesql N'
 /* LAB04_WORKLOAD */
--- Pegue aquí una consulta de la práctica 2.
+EXEC Reporting.usp_SalesByCustomerRange
+    @CustomerIDFrom = 1,
+    @CustomerIDTo = 25;
+';
+GO
 ```
 
-3. Espere unos segundos y ejecute nuevamente la consulta de Query Store.
+3. Vuelva a consultar Query Store después de `EXEC sys.sp_query_store_flush_db`.
 4. Si Query Store está en modo `READ_ONLY`, investigue la causa antes de modificar su configuración; por ejemplo, espacio máximo alcanzado o condición de solo lectura de la base de datos.
+
+### Incidencia 3: La sesión de reportes permanece en el grupo default
+
+**Síntomas**
+
+- La consulta de clasificación de `lab_reports` muestra el grupo `default`.
+- `sys.resource_governor_configuration.is_enabled` es `0`.
+- La solicitud activa no aparece al consultarla desde la ventana de administrador.
+
+**Causa probable**
+
+La segunda conexión usa autenticación de Windows, no se ejecutó `ALTER RESOURCE GOVERNOR RECONFIGURE`, o el lote de CPU ya terminó antes de la consulta de solicitudes activas.
+
+**Corrección**
+
+1. Confirme el login de la segunda ventana:
+
+```sql
+SELECT ORIGINAL_LOGIN() AS OriginalLogin;
+GO
+```
+
+El valor debe ser `lab_reports`.
+
+2. En la ventana de administrador, vuelva a aplicar la configuración:
+
+```sql
+USE master;
+GO
+
+ALTER RESOURCE GOVERNOR
+    WITH (CLASSIFIER_FUNCTION = dbo.fn_Lab04_Classifier);
+GO
+
+ALTER RESOURCE GOVERNOR RECONFIGURE;
+GO
+```
+
+3. Cierre la ventana de `lab_reports` y ábrala de nuevo. La clasificación ocurre al iniciar la sesión.
+4. Ejecute otra vez el lote de CPU y, sin esperar a que termine, consulte `sys.dm_exec_requests` desde la ventana de administrador.
+
+### Incidencia 4: No se puede eliminar el pool o el grupo
+
+**Síntomas**
+
+- `DROP WORKLOAD GROUP` o `DROP RESOURCE POOL` devuelve un error de dependencia o de sesión activa.
+
+**Causa probable**
+
+Queda una ventana conectada con `lab_reports`, o el grupo todavía referencia al pool.
+
+**Corrección**
+
+1. Cierre todas las ventanas de `lab_reports`.
+2. Elimine primero `GroupReportes` y después `PoolReportes`.
+3. Ejecute de nuevo el script de retiro del punto 10.
 
 ## Limpieza
 
@@ -1340,10 +1852,11 @@ Esta práctica establece una configuración objetivo que debe permanecer disponi
 
 Realice únicamente las siguientes acciones de limpieza:
 
-1. Guarde los scripts ejecutados en `C:\SQLLab2025\Scripts`.
-2. Mantenga los archivos de evidencia en `C:\SQLLab2025\Reports`.
-3. Cierre sesiones de SSMS que no sean necesarias.
-4. Desactive cualquier opción de estadísticas que haya quedado activa en una ventana de consulta:
+1. Si el paso 8 quedó a medias, ejecute su script de retiro. Resource Governor no debe permanecer habilitado para las prácticas siguientes. La comprobación final es `is_enabled = 0` y la ausencia de `PoolReportes`.
+2. Guarde los scripts ejecutados en `C:\SQLLab2025\Scripts`.
+3. Mantenga los archivos de evidencia en `C:\SQLLab2025\Reports`.
+4. Cierre sesiones de SSMS que no sean necesarias.
+5. Desactive cualquier opción de estadísticas que haya quedado activa en una ventana de consulta:
 
 ```sql
 SET STATISTICS IO OFF;
@@ -1351,7 +1864,7 @@ SET STATISTICS TIME OFF;
 GO
 ```
 
-5. Verifique que no quedaron operaciones administrativas en ejecución:
+6. Verifique que no quedaron operaciones administrativas en ejecución:
 
 ```sql
 SELECT
@@ -1374,13 +1887,13 @@ WHERE session_id <> @@SPID
 GO
 ```
 
-6. Si el entorno se reutilizará fuera del curso, cambie las contraseñas temporales de laboratorio y elimine cualquier archivo de informe que contenga información operativa sensible.
+7. Si el entorno se reutilizará fuera del curso, cambie las contraseñas temporales de laboratorio y elimine cualquier archivo de informe que contenga información operativa sensible.
 
 ## Resumen
 
 En esta práctica se estableció una línea base de configuración y rendimiento para SQL Server 2025 sobre Windows Server 2022. Se validaron memoria, paralelismo, rutas de archivos, estado de IFI, energía del sistema, almacenamiento y métricas de E/S.
 
-Los ajustes aplicados fueron deliberadamente limitados y reversibles: memoria máxima de SQL Server de `16384 MB`, `MAXDOP = 4` y `cost threshold for parallelism = 50`. También se configuró `tempdb` con cuatro archivos de datos homogéneos, reduciendo el riesgo de crecimiento desigual y contención asociada a una configuración inicial insuficiente.
+Los ajustes aplicados fueron deliberadamente limitados y reversibles: memoria máxima de SQL Server de `16384 MB`, `MAXDOP = 4` y `cost threshold for parallelism = 50`. También se configuró `tempdb` con cuatro archivos de datos homogéneos, reduciendo el riesgo de crecimiento desigual y contención asociada a una configuración inicial insuficiente. Resource Governor se usó para clasificar el login `lab_reports` en `PoolReportes` y `GroupReportes`, con tope de CPU y `MAXDOP = 1`, y esa configuración se retiró al cerrar el paso.
 
 Los resultados de las consultas de carga deben interpretarse junto con Query Store, planes de ejecución, estadísticas, índices y latencias de almacenamiento. Windows Server 2025 ofrece capacidades relevantes para futuras plataformas SQL Server —por ejemplo, mejoras de virtualización, almacenamiento, identidad y administración híbrida—, pero esta práctica valida exclusivamente el comportamiento observado en Windows Server 2022 build `20348.2402`.
 

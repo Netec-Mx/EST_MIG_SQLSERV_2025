@@ -96,10 +96,25 @@ $LabFolders | ForEach-Object {
     New-Item -Path $_ -ItemType Directory -Force | Out-Null
 }
 
+$SqlManagedFolders = @(
+    'C:\SQLLab2025\Data',
+    'C:\SQLLab2025\Logs',
+    'C:\SQLLab2025\Backups',
+    'C:\SQLLab2025\Audit',
+    'C:\SQLLab2025\XEvents'
+)
+
+foreach ($Folder in $SqlManagedFolders) {
+    icacls $Folder /grant '"NT SERVICE\MSSQLSERVER:(OI)(CI)M"' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "No se pudo conceder modificación a NT SERVICE\MSSQLSERVER en $Folder."
+    }
+}
+
 Get-ChildItem C:\SQLLab2025 -Directory
 ```
 
-> **Nota operativa:** la cuenta de servicio del motor SQL Server debe disponer de permisos de modificación sobre las carpetas que almacenarán archivos administrados por SQL Server, especialmente `Data`, `Logs`, `Backups`, `Audit` y `XEvents`. No otorgue permisos amplios a cuentas no relacionadas con el servicio.
+> **Nota operativa:** el script concede modificación a la cuenta virtual predeterminada `NT SERVICE\MSSQLSERVER` sobre `Data`, `Logs`, `Backups`, `Audit` y `XEvents`. Si la instancia usa otra cuenta de servicio, sustituya esa identidad en `icacls`. No otorgue permisos amplios a cuentas no relacionadas con el servicio.
 
 ## Instrucciones Paso a Paso
 
@@ -160,6 +175,7 @@ Confirmar que el servidor corresponde al entorno de laboratorio definido y que l
 - El sistema operativo corresponde a Windows Server 2022 Datacenter 21H2.
 - La compilación del sistema operativo es `20348.2402`.
 - Existen las carpetas bajo `C:\SQLLab2025`.
+- `NT SERVICE\MSSQLSERVER` puede modificar `Data`, `Logs`, `Backups`, `Audit` y `XEvents`.
 - Hay espacio suficiente para archivos de datos, logs, copias de seguridad e informes.
 - El servidor dispone de al menos 8 procesadores lógicos y de la memoria definida para el laboratorio.
 
@@ -262,14 +278,20 @@ Confirmar la versión de SSMS requerida y establecer conectividad con la instanc
 1. En PowerShell, compruebe la versión del ejecutable de SSMS:
 
    ```powershell
-   $SsmsPath = 'C:\Program Files (x86)\Microsoft SQL Server Management Studio 21\Common7\IDE\Ssms.exe'
+   $SsmsCandidates = @(
+       'C:\Program Files\Microsoft SQL Server Management Studio 21\Release\Common7\IDE\SSMS.exe',
+       'C:\Program Files (x86)\Microsoft SQL Server Management Studio 21\Common7\IDE\Ssms.exe'
+   )
 
-   if (Test-Path $SsmsPath) {
+   $SsmsPath = $SsmsCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+   if ($SsmsPath) {
+       Get-Item $SsmsPath | Select-Object FullName
        (Get-Item $SsmsPath).VersionInfo |
            Select-Object ProductName, ProductVersion, FileVersion
    }
    else {
-       Write-Warning "No se encontró SSMS en la ruta esperada. Ubique Ssms.exe y consulte su versión."
+       Write-Warning "No se encontró SSMS 21 en la ruta predeterminada. Ubique SSMS.exe y consulte su versión."
    }
    ```
 
@@ -531,10 +553,10 @@ Crear la base de datos común de las prácticas, habilitar Query Store y cargar 
    ALTER DATABASE Sql2025Lab SET QUERY_STORE
    (
        OPERATION_MODE = READ_WRITE,
-       QUERY_CAPTURE_MODE = AUTO,
+       QUERY_CAPTURE_MODE = ALL,
        CLEANUP_POLICY = (STALE_QUERY_THRESHOLD_DAYS = 30),
-       DATA_FLUSH_INTERVAL_SECONDS = 900,
-       INTERVAL_LENGTH_MINUTES = 60,
+       DATA_FLUSH_INTERVAL_SECONDS = 60,
+       INTERVAL_LENGTH_MINUTES = 1,
        MAX_STORAGE_SIZE_MB = 256
    );
    GO
@@ -841,7 +863,7 @@ Crear la base de datos común de las prácticas, habilitar Query Store y cargar 
 - La base de datos `Sql2025Lab` existe.
 - El nivel de compatibilidad es `170`.
 - El modelo de recuperación es `FULL`.
-- Query Store está habilitado en modo `READ_WRITE`.
+- Query Store está habilitado en modo `READ_WRITE` y captura todas las consultas (`ALL`).
 - Existen los esquemas `Sales`, `Reporting`, `Security` y `dbo`.
 - Las tablas `Sales.Customers`, `Sales.Orders`, `Sales.OrderLines` y `dbo.LabExecutionLog` existen.
 - La carga inicial contiene aproximadamente:
@@ -862,7 +884,8 @@ SELECT
     d.compatibility_level,
     d.recovery_model_desc,
     d.is_query_store_on,
-    q.actual_state_desc AS estado_query_store
+    q.actual_state_desc AS estado_query_store,
+    q.query_capture_mode_desc AS modo_captura
 FROM sys.databases AS d
 LEFT JOIN sys.database_query_store_options AS q
     ON d.database_id = q.database_id
@@ -876,6 +899,7 @@ El resultado debe indicar:
 - `recovery_model_desc = FULL`
 - `is_query_store_on = 1`
 - `estado_query_store = READ_WRITE`
+- `modo_captura = ALL`
 
 ---
 
@@ -919,7 +943,6 @@ Ejecutar una carga de consulta controlada para inicializar métricas en Query St
    GROUP BY
        c.CustomerCode,
        c.CustomerName;
-   GO
 
    SELECT TOP (20)
        ol.ProductCode,
@@ -948,6 +971,9 @@ Ejecutar una carga de consulta controlada para inicializar métricas en Query St
    USE Sql2025Lab;
    GO
 
+   EXEC sys.sp_query_store_flush_db;
+   GO
+
    SELECT TOP (10)
        q.query_id,
        p.plan_id,
@@ -960,7 +986,7 @@ Ejecutar una carga de consulta controlada para inicializar métricas en Query St
        ON q.query_text_id = qt.query_text_id
    INNER JOIN sys.query_store_plan AS p
        ON q.query_id = p.query_id
-   INNER JOIN sys.query_store_runtime_stats AS rs
+   LEFT JOIN sys.query_store_runtime_stats AS rs
        ON p.plan_id = rs.plan_id
    ORDER BY rs.last_execution_time DESC;
    GO
@@ -1122,14 +1148,29 @@ ORDER BY name;
 GO
 
 SELECT
+    CASE
+        WHEN EXISTS
+        (
+            SELECT 1
+            FROM sys.dm_tcp_listener_states
+            WHERE port = 1433
+              AND state_desc = 'ONLINE'
+        )
+            THEN 'CORRECTO'
+        ELSE 'REVISAR'
+    END AS validacion_puerto_1433;
+GO
+
+SELECT
     ip_address,
     port,
     state_desc,
     CASE
-        WHEN port = 1433 AND state_desc = 'ONLINE' THEN 'CORRECTO'
+        WHEN state_desc = 'ONLINE' THEN 'CORRECTO'
         ELSE 'REVISAR'
     END AS estado
-FROM sys.dm_tcp_listener_states;
+FROM sys.dm_tcp_listener_states
+WHERE port = 1433;
 GO
 
 USE Sql2025Lab;
@@ -1156,7 +1197,14 @@ GO
 SELECT
     s.name AS esquema,
     t.name AS tabla,
-    SUM(p.rows) AS filas
+    SUM(p.rows) AS filas,
+    CASE
+        WHEN s.name = N'Sales' AND t.name = N'Customers' AND SUM(p.rows) = 10000 THEN 'CORRECTO'
+        WHEN s.name = N'Sales' AND t.name = N'Orders' AND SUM(p.rows) = 100000 THEN 'CORRECTO'
+        WHEN s.name = N'Sales' AND t.name = N'OrderLines' AND SUM(p.rows) = 300000 THEN 'CORRECTO'
+        WHEN s.name = N'dbo' AND t.name = N'LabExecutionLog' AND SUM(p.rows) >= 2 THEN 'CORRECTO'
+        ELSE 'REVISAR'
+    END AS estado
 FROM sys.tables AS t
 INNER JOIN sys.schemas AS s
     ON t.schema_id = s.schema_id
@@ -1174,7 +1222,11 @@ ORDER BY s.name, t.name;
 GO
 
 SELECT
-    COUNT_BIG(*) AS planes_en_query_store
+    COUNT_BIG(*) AS planes_en_query_store,
+    CASE
+        WHEN COUNT_BIG(*) >= 1 THEN 'CORRECTO'
+        ELSE 'REVISAR'
+    END AS estado
 FROM sys.query_store_plan;
 GO
 ```
